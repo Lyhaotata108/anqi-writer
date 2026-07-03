@@ -33,7 +33,7 @@ The entire response, including metadata attributes and markdown content, MUST be
 12. **Case Study Rule**: Include at least one vivid client, patient, or reader case with specific habit details, a realistic timeline, and a clear result, side effect, or turning point. The case study must feel lived-in, not like a sterile case note.
 13. **Table Rule**: Include at least one comparison table that helps the reader judge practical tradeoffs fast.
 14. **Action Guide Rule**: Include one practical replacement plan, protocol, or action guide that tells the reader what to do instead of stopping at debunking. It must contain at least 3 concrete steps.
-15. **FAQ Rule**: End with a Frequently Asked Questions section that targets hot long-tail variants of the keyword and related social-media trend claims. Include at least 4 FAQ questions. The FAQ questions must sound like real searches for this exact query type, not generic placeholders.
+15. **FAQ Rule**: End with a Frequently Asked Questions section that targets hot long-tail variants of the keyword and related social-media trend claims. Include at least 4 FAQ questions. The FAQ questions must sound like real searches for this exact query type, not generic placeholders. Each FAQ answer should be substantial, normally 100 to 200 words, with concrete tradeoffs, examples, or next-step guidance. Do not output two-sentence FAQ answers.
 16. **Intent Continuity Rule**: If the keyword is asking whether something works, the H2s and body must revolve around proof, tradeoffs, likely results, disappointment points, cost, fit, and red flags. If the keyword is a comparison, the H2s and body must revolve around differences, fit, tradeoffs, side effects, cost, and who each option suits. If the keyword is about causes or symptoms, the H2s and body must revolve around what may be behind it, what signs matter, what gets missed, what can worsen it, and when it deserves attention. If the keyword is about a celebrity, trend, or viral claim, the H2s and body must revolve around what is actually known, what is speculation, what behavior likely matters most, and what readers should not blindly copy.
 17. **No Generic AI Fillers**: Do not use empty transitions like "In conclusion," "Furthermore," or "It is important to note" unless they carry real substance.
 18. **No Fabricated Sources or Contacts**: Do not invent doctors, clinics, agencies, studies, contact details, or links.
@@ -49,7 +49,7 @@ The entire response, including metadata attributes and markdown content, MUST be
 28. **No Lecture Tone Rule**: Avoid sounding like a textbook, compliance memo, or motivational article. Favor grounded explanation over grand framing.
 29. **No Placeholder Persona Rule**: The first-person setup must feel like a believable human observation, not a stock "I noticed many readers" or "I approached this topic" construction.
 30. **Formatting Cleanliness Rule**: Do not wrap the final markdown in code fences. Do not repeat frontmatter inside the article body. Do not output horizontal-rule separator lines unless explicitly required by the structure.
-31. **Invalid Draft Triggers**: The draft is invalid if it uses a generic explainer title, a scientific-summary title, textbook H2s, thin sections, a fake-looking FAQ, a generic case study, or an article body that drifts into broad health education instead of the query's actual decision or fear.
+31. **Invalid Draft Triggers**: The draft is invalid if it uses a generic explainer title, a scientific-summary title, textbook H2s, thin sections, a fake-looking FAQ, FAQ answers under 80 words, a generic case study, or an article body that drifts into broad health education instead of the query's actual decision or fear.
 
 ## Production Output Format
 Return only the markdown document matching the locked blueprint below.
@@ -96,10 +96,11 @@ This article draft was prepared with AI assistance and reviewed through a struct
 - Do not include any internal-link placeholder in the body.
 - The final author block must reflect the persona without inventing fake institutional affiliations.
 - The body must contain, in usable form: a direct-answer opening, a vivid case study, a comparison table, a practical action guide, a FAQ block with at least 4 questions, and a closing next-step section.
+- FAQ answers must be thick enough to be useful. Target 100 to 200 words per FAQ answer, and never use a shallow two-sentence answer.
 - Query-type contract:
   - does-it-work / review queries -> title and body must feel like a verdict feature
   - comparison queries -> title and body must feel like a side-by-side decision feature
   - symptom / cause queries -> title and body must feel like a practical cause-and-warning feature
   - celebrity / trend queries -> title and body must feel like a reality-check feature, not a fan recap
 - Model the finished article after a strong magazine sample: direct answer first, thick sections, hook-based H2s, one clean image slot, one clean video slot, and no leaked multimedia commentary text.
-- If any required component is weak, generic, or off-intent, regenerate the full draft instead of shrinking the article.
+- If any required component is weak, generic, too short, or off-intent, regenerate the full draft instead of shrinking the article.
