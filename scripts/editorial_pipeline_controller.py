@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime
+import json
 from pathlib import Path
 import re
 from typing import Iterable
@@ -38,6 +39,93 @@ class EditorialPipelineController(PipelineController):
         "current studies",
         "conclusion",
     )
+
+    def run_stage1_1(self, keyword: str, progress: ProgressCallback | None = None) -> tuple[dict, Path]:
+        """Run Stage 1-1, but do not kill the batch if Gemini is temporarily unavailable."""
+        try:
+            return super().run_stage1_1(keyword, progress)
+        except RuntimeError as error:
+            if "Stage 1-1" not in str(error):
+                raise
+            if progress:
+                progress("Pending", 12, "Stage 1-1 Gemini failed; using local fallback expansion")
+            slug = self._slugify(keyword)
+            payload = self._build_stage1_1_fallback(keyword)
+            path = self.output_root / f"ui_{slug}.stage1_1.json"
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            return payload, path
+
+    def run_stage1_2(
+        self,
+        keyword: str,
+        stage1_1: dict,
+        category_id: int | None = None,
+        keyword_id: int | None = None,
+        progress: ProgressCallback | None = None,
+    ) -> tuple[dict, Path]:
+        """Run Stage 1-2, with a local outline fallback for batch stability."""
+        try:
+            return super().run_stage1_2(keyword, stage1_1, category_id, keyword_id, progress)
+        except RuntimeError as error:
+            if "Stage 1-2" not in str(error):
+                raise
+            if progress:
+                progress("Drafting", 30, "Stage 1-2 Gemini failed; using local fallback outline")
+            slug = self._slugify(keyword)
+            payload = self._build_stage1_2_fallback(keyword, category_id=category_id, keyword_id=keyword_id)
+            path = self.output_root / f"ui_{slug}.stage1_2.json"
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            return payload, path
+
+    def _build_stage1_1_fallback(self, keyword: str) -> dict:
+        phrase = self._heading_subject(keyword)
+        return {
+            "qs": [
+                {
+                    "q": keyword,
+                    "i": f"The searcher wants a practical, real-world answer about {phrase}, including results, tradeoffs, risks, and what to do next.",
+                    "tm": "false",
+                    "ymyl_level": True,
+                }
+            ],
+            "sq": keyword,
+            "tm": "false",
+            "ymyl_level": True,
+            "language": "English",
+            "fallback": True,
+        }
+
+    def _build_stage1_2_fallback(self, keyword: str, category_id: int | None = None, keyword_id: int | None = None) -> dict:
+        query_type = self._infer_query_type(keyword)
+        node = {
+            "t": self._planning_title_from_keyword(keyword, query_type),
+            "mty": "Semantic",
+            "cs": {"ty": "Editorial Desk", "ac": "US", "ar": "", "al": ""},
+            "category_id": self._normalize_category_id(category_id),
+            "cr": {
+                "tl": "Keep the piece practical, current enough for reader decisions, and careful on YMYL claims.",
+                "s": self._planning_summary_from_keyword(keyword, query_type),
+                "wc": 2200,
+                "st": self._planning_sections_from_keyword(keyword, query_type),
+                "kp": self._planning_key_points_from_keyword(keyword, query_type),
+                "af": "The first 120 words must answer the query directly, name the main tradeoff, and tell the reader what to check before acting.",
+                "gfm": {"lsr": True},
+                "author_bio": self._default_author_bio(keyword),
+                "personal_story": self._default_personal_story(keyword),
+            },
+        }
+        if keyword_id is not None:
+            node["keyword_id"] = keyword_id
+        return {
+            "dsq": [
+                {
+                    "q": keyword,
+                    "i": f"The searcher wants a real-world editorial answer for {keyword}, not a generic explainer.",
+                    "mt": [node],
+                }
+            ],
+            "fallback": True,
+        }
 
     def build_markdown_from_plan(
         self,
