@@ -183,6 +183,7 @@ class EditorialPipelineController(PipelineController):
         faq = self._generate_editorial_faq(keyword, title, summary, persona, strict=strict)
         closing = self._build_editorial_closing(keyword)
         toc_lines = ["## Table of Contents"] + [f"- [{section}](#{self._slugify(section)})" for section in sections]
+        toc_lines.append("- [What To Do Next If You Want A Real-World Answer](#what-to-do-next-if-you-want-a-real-world-answer)")
         toc_lines.append("- [Frequently Asked Questions](#frequently-asked-questions)")
         toc_lines.append("- [The Next Step Without Guesswork](#the-next-step-without-guesswork)")
 
@@ -383,7 +384,7 @@ class EditorialPipelineController(PipelineController):
         if index == 2 or "tradeoff" in lowered or "compare" in lowered or "cost" in lowered:
             return "Include a useful markdown comparison table if it fits the section."
         if index >= total - 1 or "next" in lowered or "check" in lowered:
-            return "Include concrete action steps or a practical decision protocol."
+            return "Include concrete action steps or a practical decision checklist."
         return "Use expert-process detail, concrete examples, and search-intent judgment."
 
     def _generate_editorial_section(
@@ -443,13 +444,21 @@ class EditorialPipelineController(PipelineController):
         return text.rstrip() + table
 
     def _ensure_action_steps_exist(self, keyword: str, text: str) -> str:
-        if len(re.findall(r"^\s*\d+\.\s+", text, flags=re.MULTILINE)) >= 3:
+        if re.search(r"^##\s+What To Do", text, flags=re.MULTILINE):
             return text
         return text.rstrip() + self._fallback_action_steps(keyword)
 
+    def _ensure_action_guide(self, body: str, keyword: str) -> str:
+        """Override parent behavior so the final contract sees a real What To Do H2."""
+        if re.search(r"^##\s+What To Do", body, flags=re.MULTILINE):
+            return body
+        return body.rstrip() + self._fallback_action_steps(keyword)
+
     def _fallback_action_steps(self, keyword: str) -> str:
+        subject = self._heading_subject(keyword)
         return (
-            f"\n\nA practical next-step protocol for {keyword} looks like this:\n\n"
+            f"\n\n## What To Do Next If You Want A Real-World Answer\n\n"
+            f"A useful action guide for {subject} should turn the promise into a decision you can actually check. Use these steps before treating the idea like a finished plan.\n\n"
             "1. **Define the real decision.** Write down whether you are trying to solve results, side effects, cost, access, consistency, or confusion.\n"
             "2. **Track the friction for two weeks.** Watch the moments where the plan becomes hard, not only the moments where it seems to work.\n"
             "3. **Compare the tradeoff before escalating.** Ask whether the expected benefit is worth the time, money, symptoms, or routine change required.\n"
@@ -523,7 +532,7 @@ The next step is to slow the decision down and turn it into a checklist. First, 
             return False
         if "|" not in body or not re.search(r"\|\s*---", body):
             return False
-        if len(re.findall(r"^\s*\d+\.\s+", body, flags=re.MULTILINE)) < 3:
+        if not re.search(r"^##\s+What To Do", body, flags=re.MULTILINE):
             return False
         return True
 
