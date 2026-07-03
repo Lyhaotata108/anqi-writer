@@ -98,34 +98,34 @@ INDEX_HTML = r"""<!doctype html>
   <div class="wrap">
     <div class="header">
       <h1>AnQiCMS Batch Generator</h1>
-      <div class="sub">Three categories · batch keywords · editorial segmented generation · markdown preview · CMS import</div>
+      <div class="sub">Category mapping: 1 减肥药 · 5 CBD · 9 Blood · batch keywords · markdown preview · CMS import</div>
     </div>
 
     <div class="card">
       <div class="category-grid">
         <div class="bucket">
           <div class="bucket-head">
-            <div><label>Category 1 Name</label><input id="catName1" value="Weight Loss" /></div>
+            <div><label>Category 1 Name</label><input id="catName1" value="减肥药" /></div>
             <div><label>ID</label><input id="catId1" value="1" /></div>
           </div>
           <label>Keywords, one per line</label>
-          <textarea id="keywords1" placeholder="mounjaro weight loss&#10;what does a dietitian do for weight loss"></textarea>
+          <textarea id="keywords1" placeholder="mounjaro weight loss&#10;weight loss medication side effects"></textarea>
         </div>
         <div class="bucket">
           <div class="bucket-head">
-            <div><label>Category 2 Name</label><input id="catName2" value="Blood Health" /></div>
+            <div><label>Category 2 Name</label><input id="catName2" value="CBD" /></div>
             <div><label>ID</label><input id="catId2" value="5" /></div>
           </div>
           <label>Keywords, one per line</label>
-          <textarea id="keywords2" placeholder="cholesterol symptoms&#10;blood sugar after eating"></textarea>
+          <textarea id="keywords2" placeholder="cbd gummies for sleep&#10;cbd oil side effects"></textarea>
         </div>
         <div class="bucket">
           <div class="bucket-head">
-            <div><label>Category 3 Name</label><input id="catName3" value="CBD" /></div>
+            <div><label>Category 3 Name</label><input id="catName3" value="Blood" /></div>
             <div><label>ID</label><input id="catId3" value="9" /></div>
           </div>
           <label>Keywords, one per line</label>
-          <textarea id="keywords3" placeholder="cbd gummies for sleep&#10;cbd oil side effects"></textarea>
+          <textarea id="keywords3" placeholder="cholesterol symptoms&#10;blood sugar after eating"></textarea>
         </div>
       </div>
 
@@ -133,7 +133,7 @@ INDEX_HTML = r"""<!doctype html>
         <button id="startBtn" onclick="startBatchGeneration()">Start Batch Generation</button>
         <button class="secondary" onclick="fillDemo()">Fill Demo</button>
         <button class="secondary" onclick="clearAll()">Clear</button>
-        <span class="tiny">批量规则：每行一个关键词；系统会按所属分类 ID 逐个生成 `.md`。</span>
+        <span class="tiny">批量规则：每行一个关键词；系统会按所属分类 ID 逐个生成 `.md`。分类：1=减肥药，5=CBD，9=Blood。</span>
       </div>
 
       <div class="status-row">
@@ -193,9 +193,9 @@ function setStatus(text, percent) {
 }
 
 function fillDemo() {
-  document.getElementById('keywords1').value = 'mounjaro weight loss\nwhat does a dietitian do for weight loss';
-  document.getElementById('keywords2').value = 'cholesterol symptoms\nblood sugar after eating';
-  document.getElementById('keywords3').value = 'cbd gummies for sleep\ncbd oil side effects';
+  document.getElementById('keywords1').value = 'mounjaro weight loss\nweight loss medication side effects';
+  document.getElementById('keywords2').value = 'cbd gummies for sleep\ncbd oil side effects';
+  document.getElementById('keywords3').value = 'cholesterol symptoms\nblood sugar after eating';
 }
 
 function clearAll() {
