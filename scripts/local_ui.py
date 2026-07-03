@@ -10,7 +10,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 import webbrowser
 
-from pipeline_controller import PipelineController, PipelineResult
+from editorial_pipeline_controller import EditorialPipelineController, PipelineResult
 
 
 WORKSPACE_ROOT = Path("/Users/hjg/Documents/anqicms-writer")
@@ -24,7 +24,7 @@ class LocalPipelineUI:
         self.root.title("AnQiCMS Local Generator")
         self.root.geometry("980x760")
         self.root.minsize(900, 680)
-        self.controller = PipelineController(WORKSPACE_ROOT)
+        self.controller = EditorialPipelineController(WORKSPACE_ROOT)
         self.current_result: PipelineResult | None = None
         self._configure_style()
         self._build()
