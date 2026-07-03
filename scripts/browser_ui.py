@@ -253,7 +253,7 @@ async function startBatchGeneration() {
   }
   currentJobId = data.job_id;
   if (polling) clearInterval(polling);
-  polling = setInterval(pollStatus, 1000);
+  polling = setInterval(pollStatus, 2000);
   await pollStatus();
 }
 
@@ -455,10 +455,13 @@ def _build_summary_text(results: list[dict], total: int) -> str:
 
 
 class BrowserUIHandler(BaseHTTPRequestHandler):
-    server_version = "AnQiCMSBrowserUI/2.0"
+    server_version = "AnQiCMSBrowserUI/2.1"
 
     def log_message(self, format: str, *args) -> None:
-        print(f"[{self.log_date_time_string()}] {format % args}")
+        message = format % args
+        if "GET /api/status?" in message:
+            return
+        print(f"[{self.log_date_time_string()}] {message}")
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
