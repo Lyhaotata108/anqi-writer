@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 """Local Tkinter UI for keyword-driven preview and CMS import.
 
-This version intentionally uses plain tkinter widgets instead of ttk-heavy
-styling. On some macOS/Tk combinations, themed ttk frames can open a normal
-window title bar but render a blank content area. Plain tk widgets are more
-predictable for this local utility.
+This UI uses direct fixed-position tkinter placement instead of nested ttk,
+pack, grid, or paned layouts. Some macOS system Tk builds can show a normal
+window but fail to lay out nested themed widgets correctly. Fixed placement is
+less elegant, but it is the most predictable for this local utility.
 """
 
 from __future__ import annotations
@@ -24,8 +24,6 @@ WORKSPACE_ROOT = Path("/Users/hjg/Documents/anqicms-writer")
 
 
 class LocalPipelineUI:
-    """Minimal GUI for local generation, preview, and CMS import."""
-
     BG = "#f3f4f6"
     CARD = "#ffffff"
     TEXT = "#111827"
@@ -41,25 +39,69 @@ class LocalPipelineUI:
         self.root.geometry("1180x760")
         self.root.minsize(980, 680)
         self.root.configure(bg=self.BG)
+        self.root.option_add("*Font", "Arial 12")
+
         self.controller = EditorialPipelineController(WORKSPACE_ROOT)
         self.current_result: PipelineResult | None = None
-        self.stage_var = tk.StringVar(value="Stage: Idle")
-        self.publish_status_var = tk.StringVar(value="Publish status: not started")
+
         self.keyword_var = tk.StringVar()
         self.category_var = tk.StringVar(value="1")
         self.keyword_id_var = tk.StringVar()
-        self._build()
+        self.stage_var = tk.StringVar(value="Stage: Idle")
+        self.publish_status_var = tk.StringVar(value="Publish status: not started")
+        self._progress_percent = 0
+
+        self._build_fixed_ui()
         self.root.after(100, lambda: self.append_log("UI loaded. Enter a keyword, then click Start generation."))
 
-    def _label(self, parent: tk.Widget, text: str, size: int = 12, bold: bool = False, color: str | None = None) -> tk.Label:
-        font = ("Arial", size, "bold" if bold else "normal")
-        return tk.Label(parent, text=text, bg=parent.cget("bg"), fg=color or self.TEXT, font=font, anchor="w")
+    def _make_label(self, text: str, x: int, y: int, w: int, h: int = 24, size: int = 12, bold: bool = False, color: str | None = None) -> tk.Label:
+        label = tk.Label(
+            self.root,
+            text=text,
+            bg=self.BG,
+            fg=color or self.TEXT,
+            anchor="w",
+            font=("Arial", size, "bold" if bold else "normal"),
+        )
+        label.place(x=x, y=y, width=w, height=h)
+        return label
 
-    def _entry(self, parent: tk.Widget, var: tk.StringVar, width: int = 20) -> tk.Entry:
-        return tk.Entry(
-            parent,
+    def _make_entry(self, var: tk.StringVar, x: int, y: int, w: int, h: int = 30) -> tk.Entry:
+        entry = tk.Entry(
+            self.root,
             textvariable=var,
-            width=width,
+            bg="#ffffff",
+            fg=self.TEXT,
+            insertbackground=self.TEXT,
+            relief="solid",
+            bd=1,
+            highlightthickness=1,
+            highlightbackground=self.BORDER,
+            highlightcolor="#111827",
+        )
+        entry.place(x=x, y=y, width=w, height=h)
+        return entry
+
+    def _make_button(self, text: str, command, x: int, y: int, w: int, h: int = 32, disabled: bool = False) -> tk.Button:
+        btn = tk.Button(
+            self.root,
+            text=text,
+            command=command,
+            bg=self.BUTTON if not disabled else self.DISABLED,
+            fg=self.BUTTON_TEXT,
+            activebackground="#374151",
+            activeforeground=self.BUTTON_TEXT,
+            relief="flat",
+            cursor="hand2",
+            state="disabled" if disabled else "normal",
+        )
+        btn.place(x=x, y=y, width=w, height=h)
+        return btn
+
+    def _make_text(self, x: int, y: int, w: int, h: int) -> tk.Text:
+        text = tk.Text(
+            self.root,
+            wrap="word",
             bg="#ffffff",
             fg=self.TEXT,
             insertbackground=self.TEXT,
@@ -68,114 +110,81 @@ class LocalPipelineUI:
             highlightthickness=1,
             highlightbackground=self.BORDER,
         )
+        text.place(x=x, y=y, width=w, height=h)
+        return text
 
-    def _button(self, parent: tk.Widget, text: str, command, disabled: bool = False) -> tk.Button:
-        btn = tk.Button(
-            parent,
-            text=text,
-            command=command,
-            bg=self.BUTTON if not disabled else self.DISABLED,
-            fg=self.BUTTON_TEXT,
-            activebackground="#374151",
-            activeforeground=self.BUTTON_TEXT,
-            relief="flat",
-            padx=14,
-            pady=7,
-            cursor="hand2",
-            state="disabled" if disabled else "normal",
-        )
-        return btn
-
-    def _set_button_state(self, btn: tk.Button, enabled: bool) -> None:
-        btn.config(
-            state="normal" if enabled else "disabled",
-            bg=self.BUTTON if enabled else self.DISABLED,
-        )
-
-    def _build(self) -> None:
-        shell = tk.Frame(self.root, bg=self.BG, padx=16, pady=16)
-        shell.pack(fill="both", expand=True)
-
-        header = tk.Frame(shell, bg=self.BG)
-        header.pack(fill="x", pady=(0, 12))
-        self._label(header, "AnQiCMS Local Generator", size=18, bold=True).pack(anchor="w")
-        self._label(
-            header,
+    def _build_fixed_ui(self) -> None:
+        # Header
+        self._make_label("AnQiCMS Local Generator", 24, 18, 500, 28, size=18, bold=True)
+        self._make_label(
             "Editorial segmented generation · expert-process style · local markdown preview · CMS import",
+            24,
+            48,
+            720,
+            22,
             size=11,
             color=self.MUTED,
-        ).pack(anchor="w", pady=(3, 0))
+        )
 
-        top = tk.Frame(shell, bg=self.CARD, padx=14, pady=14, highlightthickness=1, highlightbackground=self.BORDER)
-        top.pack(fill="x")
+        # Input row
+        self._make_label("Keyword", 24, 92, 90, 24, bold=True)
+        self.keyword_entry = self._make_entry(self.keyword_var, 110, 88, 520, 32)
 
-        self._label(top, "Keyword", bold=True).grid(row=0, column=0, sticky="w", padx=(0, 8))
-        self._entry(top, self.keyword_var, width=58).grid(row=0, column=1, columnspan=3, sticky="ew", padx=(0, 10))
+        self._make_label("Category ID", 650, 92, 100, 24, bold=True)
+        self.category_entry = self._make_entry(self.category_var, 748, 88, 80, 32)
 
-        self.start_btn = self._button(top, "Start generation", self.start_generation)
-        self.start_btn.grid(row=0, column=4, sticky="ew", padx=(8, 0))
+        self._make_label("Keyword ID", 848, 92, 92, 24, bold=True)
+        self.keyword_id_entry = self._make_entry(self.keyword_id_var, 940, 88, 80, 32)
 
-        self.preview_btn = self._button(top, "Open Preview", self.open_preview, disabled=True)
-        self.preview_btn.grid(row=0, column=5, sticky="ew", padx=(8, 0))
+        self.start_btn = self._make_button("Start generation", self.start_generation, 1038, 86, 128, 34)
 
-        self._label(top, "Category ID").grid(row=1, column=0, sticky="w", pady=(10, 0), padx=(0, 8))
-        self._entry(top, self.category_var, width=18).grid(row=1, column=1, sticky="w", pady=(10, 0), padx=(0, 10))
+        # Secondary buttons
+        self.preview_btn = self._make_button("Open Preview", self.open_preview, 1038, 128, 128, 34, disabled=True)
+        self.publish_btn = self._make_button("Import to CMS", self.publish_to_cms, 890, 128, 138, 34, disabled=True)
 
-        self._label(top, "Keyword ID").grid(row=1, column=2, sticky="w", pady=(10, 0), padx=(0, 8))
-        self._entry(top, self.keyword_id_var, width=18).grid(row=1, column=3, sticky="w", pady=(10, 0), padx=(0, 10))
+        # Status
+        self.stage_label = tk.Label(self.root, textvariable=self.stage_var, bg=self.BG, fg=self.TEXT, anchor="w", font=("Arial", 12, "bold"))
+        self.stage_label.place(x=24, y=140, width=760, height=24)
+        self.progress_canvas = tk.Canvas(self.root, bg="#e5e7eb", highlightthickness=0)
+        self.progress_canvas.place(x=24, y=168, width=760, height=14)
+        self._draw_progress(0)
 
-        self.publish_btn = self._button(top, "Import to CMS", self.publish_to_cms, disabled=True)
-        self.publish_btn.grid(row=1, column=4, columnspan=2, sticky="ew", pady=(10, 0), padx=(8, 0))
+        # Main panels
+        self._make_label("Logs", 24, 205, 220, 24, bold=True)
+        self.log_text = self._make_text(24, 232, 540, 430)
 
-        top.columnconfigure(1, weight=1)
-        top.columnconfigure(3, weight=1)
+        self._make_label("Result Summary", 590, 205, 220, 24, bold=True)
+        self.summary_text = self._make_text(590, 232, 560, 145)
 
-        status = tk.Frame(shell, bg=self.CARD, padx=14, pady=10, highlightthickness=1, highlightbackground=self.BORDER)
-        status.pack(fill="x", pady=(12, 0))
-        self._label(status, "Status", bold=True).pack(anchor="w")
-        self.stage_label = tk.Label(status, textvariable=self.stage_var, bg=self.CARD, fg=self.TEXT, anchor="w")
-        self.stage_label.pack(fill="x", pady=(4, 6))
-        self.progress_canvas = tk.Canvas(status, height=12, bg="#e5e7eb", highlightthickness=0)
-        self.progress_canvas.pack(fill="x")
-        self._progress_percent = 0
-        self.root.bind("<Configure>", lambda _event: self._draw_progress(self._progress_percent))
+        self._make_label("Markdown Preview", 590, 398, 220, 24, bold=True)
+        self.markdown_text = self._make_text(590, 425, 560, 237)
 
-        middle = tk.Frame(shell, bg=self.BG)
-        middle.pack(fill="both", expand=True, pady=(12, 12))
-        middle.columnconfigure(0, weight=3)
-        middle.columnconfigure(1, weight=2)
-        middle.rowconfigure(0, weight=1)
-
-        left_card = tk.Frame(middle, bg=self.CARD, padx=12, pady=12, highlightthickness=1, highlightbackground=self.BORDER)
-        left_card.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        self._label(left_card, "Logs", bold=True).pack(anchor="w")
-        self.log_text = tk.Text(left_card, height=28, wrap="word", bg="#ffffff", fg=self.TEXT, relief="solid", bd=1)
-        self.log_text.pack(fill="both", expand=True, pady=(8, 0))
-
-        right_card = tk.Frame(middle, bg=self.CARD, padx=12, pady=12, highlightthickness=1, highlightbackground=self.BORDER)
-        right_card.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
-        self._label(right_card, "Result Summary", bold=True).pack(anchor="w")
-        self.summary_text = tk.Text(right_card, height=9, wrap="word", bg="#ffffff", fg=self.TEXT, relief="solid", bd=1)
-        self.summary_text.pack(fill="x", pady=(8, 12))
-
-        self._label(right_card, "Markdown Preview", bold=True).pack(anchor="w")
-        self.markdown_text = tk.Text(right_card, height=18, wrap="word", bg="#ffffff", fg=self.TEXT, relief="solid", bd=1)
-        self.markdown_text.pack(fill="both", expand=True, pady=(8, 0))
-
-        footer = tk.Frame(shell, bg=self.BG)
-        footer.pack(fill="x")
-        tk.Label(footer, textvariable=self.publish_status_var, bg=self.BG, fg=self.TEXT, anchor="w", font=("Arial", 11, "bold")).pack(anchor="w")
+        self.publish_label = tk.Label(
+            self.root,
+            textvariable=self.publish_status_var,
+            bg=self.BG,
+            fg=self.TEXT,
+            anchor="w",
+            font=("Arial", 12, "bold"),
+        )
+        self.publish_label.place(x=24, y=690, width=1120, height=28)
 
     def _draw_progress(self, percent: int) -> None:
         self._progress_percent = max(0, min(100, int(percent)))
         if not hasattr(self, "progress_canvas"):
             return
         self.progress_canvas.delete("all")
-        width = max(1, self.progress_canvas.winfo_width())
-        height = max(1, self.progress_canvas.winfo_height())
+        width = max(1, self.progress_canvas.winfo_width() or 760)
+        height = max(1, self.progress_canvas.winfo_height() or 14)
         fill_width = int(width * self._progress_percent / 100)
         self.progress_canvas.create_rectangle(0, 0, width, height, fill="#e5e7eb", outline="")
         self.progress_canvas.create_rectangle(0, 0, fill_width, height, fill="#111827", outline="")
+
+    def _set_button_state(self, btn: tk.Button, enabled: bool) -> None:
+        btn.config(
+            state="normal" if enabled else "disabled",
+            bg=self.BUTTON if enabled else self.DISABLED,
+        )
 
     def append_log(self, message: str) -> None:
         self.log_text.insert("end", message + "\n")
@@ -201,8 +210,7 @@ class LocalPipelineUI:
         self.markdown_text.delete("1.0", "end")
         self.publish_status_var.set("Publish status: not started")
         self.update_progress("Queued", 5, "Starting generation worker")
-        thread = threading.Thread(target=self._run_generation_worker, daemon=True)
-        thread.start()
+        threading.Thread(target=self._run_generation_worker, daemon=True).start()
 
     def _run_generation_worker(self) -> None:
         try:
@@ -249,8 +257,7 @@ class LocalPipelineUI:
             messagebox.showerror("Nothing to publish", "Generate an article first.")
             return
         self._set_button_state(self.publish_btn, False)
-        thread = threading.Thread(target=self._publish_worker, daemon=True)
-        thread.start()
+        threading.Thread(target=self._publish_worker, daemon=True).start()
 
     def _publish_worker(self) -> None:
         try:
@@ -275,7 +282,7 @@ class LocalPipelineUI:
 
 def main() -> None:
     root = tk.Tk()
-    app = LocalPipelineUI(root)
+    LocalPipelineUI(root)
     root.mainloop()
 
 
