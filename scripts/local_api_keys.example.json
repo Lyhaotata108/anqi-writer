@@ -1,0 +1,8 @@
+{
+  "PEXELS_API_KEY": "paste-your-pexels-api-key-here",
+  "UNSPLASH_ACCESS_KEY": "paste-your-unsplash-access-key-here",
+  "YOUTUBE_DATA_API_KEY": "paste-your-youtube-data-api-key-here",
+  "GEMINI_BASE_URL": "https://www.blueshirtmap.com",
+  "GEMINI_API_KEY": "sk-74WP9GAjAmpY7sWztlZnMRp03DXaOGjwEzipQq0EgXVKuCHu",
+  "GEMINI_MODEL": "gemini-3-flash-preview"
+}

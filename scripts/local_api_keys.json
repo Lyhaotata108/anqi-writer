@@ -1,0 +1,5 @@
+{
+ "GEMINI_BASE_URL": "https://www.blueshirtmap.com",
+  "GEMINI_API_KEY": "sk-74WP9GAjAmpY7sWztlZnMRp03DXaOGjwEzipQq0EgXVKuCHu",
+  "GEMINI_MODEL": "gemini-3-flash-preview"
+}
