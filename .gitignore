@@ -1,0 +1,16 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local secrets
+.env
+scripts/local_api_keys.json
+
+# Local editor / assistant state
+.claude/settings.local.json
+.continue/
