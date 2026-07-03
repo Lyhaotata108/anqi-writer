@@ -26,10 +26,22 @@ These rules are mandatory, not optional.
 - If the raw keyword is a symptom / cause query, the plan must read like a practical cause-and-warning feature.
 - If the raw keyword is a celebrity / trend query, the plan must read like a reality-check feature, not a fan recap or medical monograph.
 
+## Editorial Reference Pattern
+Plan articles so they can read like an expert taking the reader inside the real process, not like a neutral explainer. The best structure often feels like:
+- direct search-intent answer in the first two paragraphs
+- a process breakdown or step-by-step section when the query asks what happens, how it works, what to expect, or whether something is worth doing
+- practitioner-style observations without inventing fake credentials
+- one or two realistic mini-stories with timeline, friction, turning point, and measurable outcome
+- practical comparison table
+- thick FAQ that captures People Also Ask style questions
+
+When the keyword naturally supports it, include one H2 that explicitly uses a process frame, such as `The Real Process Behind X`, `What Actually Happens Step By Step`, `Where The Plan Usually Breaks`, or `The Check-In Point Most People Miss`. Do not force this if the query is better served by a comparison or warning-sign structure.
+
 ## Title Generation Rules
 The title field `t` must be generated creatively from the keyword and intent. It must not be a local-template-sounding fallback.
 Use one of these editorial directions when it fits the query:
 - First-person test or reveal: `I Tried X`, `I Looked Into X`, `I Tracked X`, `I Compared X and Y`
+- Process reveal: `What X Actually Looks Like Inside The Process`, `A Real Look At X From Start To Finish`
 - Verdict: `Does X Actually Work`, `What Really Happens With X`, `The Honest Answer on X`
 - Anti-hype or reality check: `X Sounds Simple Until...`, `The Part of X Most People Miss`
 - Comparison: `X vs Y`, `X or Y`, `The Tradeoff Between X and Y`
@@ -42,6 +54,7 @@ The section list `cr.st` is the most important planning output after the title. 
 Each H2 must feel like a search-chain extension of the original keyword, not a textbook directory.
 A good H2 should answer a real next question such as:
 - what actually changes the result
+- what the process looks like step by step
 - why people first think it works and later get disappointed
 - who is most likely to regret it
 - what hidden tradeoff changes the decision
@@ -61,10 +74,11 @@ Bad H2 examples:
 - Conclusion
 
 Good H2 style examples:
-- Why X Feels Convincing Before the Tradeoffs Show Up
-- The Result People Expect From X Is Not Always the Result They Get
-- Who Is Most Likely to Regret Trying X
-- The Cost Difference That Changes the Decision
+- What The First Appointment Actually Changes
+- Why X Feels Convincing Before The Tradeoffs Show Up
+- The Result People Expect From X Is Not Always The Result They Get
+- Who Is Most Likely To Regret Trying X
+- The Cost Difference That Changes The Decision
 - What To Check Before You Copy This Trend
 
 ## Persona Injection Rules
@@ -121,7 +135,7 @@ Provide only the raw JSON payload matching this exact structure.
 2. Generate 1 to 3 titles per keyword.
 3. Titles must be precise, search-aligned, and strongly clickable without sounding fake.
 4. `wc` must be a single integer and should normally be between 2000 and 2800 for full articles.
-5. `t` must bias toward reveal, verdict, tradeoff, regret, comparison, or what-actually-happens language. Do not output academic-review phrasing.
+5. `t` must bias toward reveal, verdict, tradeoff, regret, comparison, process breakdown, or what-actually-happens language. Do not output academic-review phrasing.
 6. `st` must contain 4 to 6 search-intent H2 headings. They must not be generic structure labels.
 7. `kp` should highlight concrete user decisions, not vague inspiration.
 8. `gfm.lsr` should be `true` for comparison tables, tradeoff matrices, timelines, or decision summaries.
