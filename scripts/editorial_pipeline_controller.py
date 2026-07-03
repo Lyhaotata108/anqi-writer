@@ -62,20 +62,20 @@ class EditorialPipelineController(PipelineController):
         resolved_keyword_id = keyword_id if keyword_id is not None else node.get("keyword_id")
         article_style = style if style in self.ARTICLE_STYLE_RULES else self.suggest_title_styles(keyword)[0]
 
-        body = self._run_editorial_segmented_stage2(keyword, node, article_style, strict=False)
+        body = self._run_editorial_segmented_stage2(keyword, node, article_style, strict=False, progress=progress)
         if body is None or not self._passes_editorial_shape(body):
             if progress:
-                progress("Fact_Checking", 51, "Segmented draft was weak, retrying stricter section generation")
-            body = self._run_editorial_segmented_stage2(keyword, node, article_style, strict=True)
+                progress("Fact_Checking", 55, "Segmented draft was weak, retrying stricter section generation")
+            body = self._run_editorial_segmented_stage2(keyword, node, article_style, strict=True, progress=progress)
 
         if body is None or not self._is_usable_stage2_body(body):
             if progress:
-                progress("Fact_Checking", 54, "Segmented generation failed, using recovery writer once")
+                progress("Fact_Checking", 56, "Segmented generation failed, using recovery writer once")
             body = self._run_stage2_recovery_llm(keyword, node, article_style)
 
         if body is None or not self._is_usable_stage2_body(body):
             if progress:
-                progress("Fact_Checking", 56, "Recovery failed, using local emergency article builder")
+                progress("Fact_Checking", 57, "Recovery failed, using local emergency article builder")
             body = self._build_article_body_from_plan(keyword, markdown_path, node)
 
         draft_body = self._normalize_media_blocks(body, markdown_path, keyword)
@@ -108,7 +108,14 @@ class EditorialPipelineController(PipelineController):
             progress("SEO_Optimizing", 65, f"Rendered final markdown: {markdown_path.name}")
         return markdown_path
 
-    def _run_editorial_segmented_stage2(self, keyword: str, node: dict, style: str, strict: bool = False) -> str | None:
+    def _run_editorial_segmented_stage2(
+        self,
+        keyword: str,
+        node: dict,
+        style: str,
+        strict: bool = False,
+        progress: ProgressCallback | None = None,
+    ) -> str | None:
         cr = node.get("cr", {}) or {}
         sections = self._normalize_planning_sections(cr.get("st", []) or [], keyword)[:6]
         key_points = self._normalize_planning_key_points(cr.get("kp", []) or [], keyword)
@@ -123,9 +130,17 @@ class EditorialPipelineController(PipelineController):
         updated_line = f"Last updated: {datetime.now().strftime('%A, %B %d, %Y')}"
         intro = self._build_expert_process_opening(keyword, summary, personal_story)
 
+        if progress:
+            mode = "strict retry" if strict else "primary pass"
+            progress("Fact_Checking", 46, f"Stage2 {mode}: outline ready with {len(sections)} sections")
+
         section_blocks: list[str] = []
         prior_context = intro
+        total_sections = max(1, len(sections))
         for index, section in enumerate(sections):
+            if progress:
+                percent = 47 + int((index / total_sections) * 7)
+                progress("Fact_Checking", percent, f"Generating section {index + 1}/{len(sections)}: {section[:80]}")
             point = key_points[index] if index < len(key_points) else summary
             must_include = self._section_requirement(index, len(sections), section)
             section_body = self._generate_editorial_section(
@@ -141,6 +156,8 @@ class EditorialPipelineController(PipelineController):
                 strict=strict,
             )
             if not section_body:
+                if progress:
+                    progress("Fact_Checking", 47 + int((index / total_sections) * 7), f"Using local fallback for section {index + 1}/{len(sections)}")
                 section_body = self._compose_section_paragraph(keyword, section, summary, key_points, index)
             section_body = self._clean_segmented_section_body(section_body)
             section_body = self._repair_section_if_needed(keyword, section_body, index, len(sections))
@@ -155,16 +172,22 @@ class EditorialPipelineController(PipelineController):
             section_blocks.append(block)
             prior_context = "\n\n".join(section_blocks[-2:])
 
+        if progress:
+            progress("Fact_Checking", 54, "Assembling table, action steps, and section transitions")
         joined_sections = "\n\n".join(section_blocks)
         joined_sections = self._ensure_table_exists(keyword, joined_sections)
         joined_sections = self._ensure_action_steps_exist(keyword, joined_sections)
 
+        if progress:
+            progress("Fact_Checking", 55, "Generating thick FAQ section")
         faq = self._generate_editorial_faq(keyword, title, summary, persona, strict=strict)
         closing = self._build_editorial_closing(keyword)
         toc_lines = ["## Table of Contents"] + [f"- [{section}](#{self._slugify(section)})" for section in sections]
         toc_lines.append("- [Frequently Asked Questions](#frequently-asked-questions)")
         toc_lines.append("- [The Next Step Without Guesswork](#the-next-step-without-guesswork)")
 
+        if progress:
+            progress("Fact_Checking", 56, "Finalizing segmented article body")
         body = "\n\n".join(
             [
                 "> **Disclaimer:** This content is for general educational purposes only and does not replace individualized professional advice.",
@@ -479,7 +502,7 @@ The people most likely to regret {subject} are usually the ones who start with a
 
 ### What should I track before deciding whether to continue
 
-Track the parts that reveal whether the process is sustainable. The scale or headline outcome is only one signal. Watch your energy, sleep, cravings, mood, digestion, spending, skipped routines, and the moments where the plan feels hardest to follow. A two-week pattern tells you more than a single good day. If the plan touches medication, medical nutrition, supplements, or a health condition, bring those notes to a qualified professional instead of trying to interpret every signal alone.
+Track the parts that reveal whether the process is sustainable. The scale or headline outcome is only one signal. Watch your energy, sleep, cravings, mood, digestion, spending, and the moments where the plan feels hardest to follow. A two-week pattern tells you more than a single good day. If the plan touches medication, medical nutrition, supplements, or a health condition, bring those notes to a qualified professional instead of trying to interpret every signal alone.
 
 ### What is the next step if I am still unsure
 
