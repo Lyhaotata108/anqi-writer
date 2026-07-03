@@ -2,18 +2,10 @@
 # -*- coding: utf-8 -*-
 """Editorial segmented generation controller.
 
-This controller keeps the existing pipeline stages, but changes Stage 2 into the
-workflow we actually want for production quality:
-
-1. Use the Stage 1-2 title, summary, H2s, key points, and persona as a shared outline.
-2. Generate the article section by section instead of hoping one full-page call holds together.
-3. Generate FAQ as its own thick section.
-4. Always save a `.draft.md` first.
-5. Only then normalize the final body and write the final `.md`.
-
-The goal is not a generic explainer. The goal is the expert-process article
-style: direct answer, real friction, process breakdown, scenario, table, action
-steps, thick FAQ, and a clear next step.
+This controller makes Stage 2 section-by-section by default so the finished
+article is closer to an expert-process feature: direct answer, real friction,
+process breakdown, scenario, table, action steps, thick FAQ, and a clear next
+step.
 """
 
 from __future__ import annotations
@@ -22,6 +14,7 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 import re
+from typing import Iterable
 
 from pipeline_controller import PipelineController, PipelineResult, ProgressCallback
 from preview_renderer import render_preview_html
@@ -30,6 +23,21 @@ from publish_articles import load_article
 
 class EditorialPipelineController(PipelineController):
     """PipelineController variant that makes segmented Stage 2 the default."""
+
+    INVALID_SECTION_TOKENS = (
+        "understanding",
+        "key findings",
+        "mechanism",
+        "clinical evidence",
+        "contraindications",
+        "benefits",
+        "risks",
+        "safety profile",
+        "overview",
+        "explained",
+        "current studies",
+        "conclusion",
+    )
 
     def build_markdown_from_plan(
         self,
@@ -47,8 +55,9 @@ class EditorialPipelineController(PipelineController):
         markdown_path = self.output_root / f"ui_{slug}.md"
         draft_markdown_path = self.output_root / f"ui_{slug}.draft.md"
         node = self._select_best_stage2_node(keyword, stage1_2)
-        title = self._normalize_final_title(node["t"], keyword)
-        description = self._truncate_description(str(node["cr"]["s"]))
+        cr = node.setdefault("cr", {})
+        title = self._normalize_final_title(str(node.get("t", keyword)), keyword)
+        description = self._truncate_description(str(cr.get("s") or self._build_description(keyword)))
         category_value = self._normalize_category_id(category_id if category_id is not None else node.get("category_id"))
         resolved_keyword_id = keyword_id if keyword_id is not None else node.get("keyword_id")
         article_style = style if style in self.ARTICLE_STYLE_RULES else self.suggest_title_styles(keyword)[0]
@@ -107,11 +116,11 @@ class EditorialPipelineController(PipelineController):
             sections = self._planning_sections_from_keyword(keyword, self._infer_query_type(keyword))[:5]
 
         title = self._normalize_final_title(str(node.get("t", keyword)), keyword)
-        summary = str(cr.get("s", self._build_description(keyword))).strip()
-        persona = str(cr.get("author_bio", self._default_author_bio(keyword))).strip()
-        personal_story = str(cr.get("personal_story", self._default_personal_story(keyword))).strip()
+        summary = str(cr.get("s") or self._build_description(keyword)).strip()
+        persona = str(cr.get("author_bio") or self._default_author_bio(keyword)).strip()
+        personal_story = str(cr.get("personal_story") or self._default_personal_story(keyword)).strip()
         style_rule = self.ARTICLE_STYLE_RULES.get(style, self.ARTICLE_STYLE_RULES["question"])
-        updated_line = f"Last updated: {datetime.now().strftime('%A, %B %-d, %Y')}"
+        updated_line = f"Last updated: {datetime.now().strftime('%A, %B %d, %Y')}"
         intro = self._build_expert_process_opening(keyword, summary, personal_story)
 
         section_blocks: list[str] = []
@@ -169,6 +178,171 @@ class EditorialPipelineController(PipelineController):
         )
         return body.strip()
 
+    def _normalize_planning_sections(self, raw_sections: Iterable[object], keyword: str) -> list[str]:
+        cleaned: list[str] = []
+        for raw in raw_sections:
+            heading = re.sub(r"\s+", " ", str(raw or "")).strip().strip("#:- ")
+            if not heading:
+                continue
+            lowered = heading.lower()
+            if any(token in lowered for token in self.INVALID_SECTION_TOKENS):
+                continue
+            heading = heading.replace(":", "")
+            if heading not in cleaned:
+                cleaned.append(heading)
+        if len(cleaned) >= 4:
+            return cleaned[:6]
+        return self._planning_sections_from_keyword(keyword, self._infer_query_type(keyword))
+
+    def _normalize_planning_key_points(self, raw_points: Iterable[object], keyword: str) -> list[str]:
+        cleaned: list[str] = []
+        for raw in raw_points:
+            point = re.sub(r"\s+", " ", str(raw or "")).strip()
+            if point and point not in cleaned:
+                cleaned.append(point)
+        if cleaned:
+            return cleaned[:6]
+        return self._planning_key_points_from_keyword(keyword, self._infer_query_type(keyword))
+
+    def _infer_query_type(self, keyword: str) -> str:
+        parent = getattr(super(), "_infer_query_type", None)
+        if callable(parent):
+            try:
+                return str(parent(keyword))
+            except Exception:
+                pass
+        lowered = keyword.lower()
+        if any(token in lowered for token in (" vs ", " versus ", "compare", "comparison", "better than")):
+            return "comparison"
+        if any(token in lowered for token in ("symptom", "cause", "why", "pain", "after eating", "high", "low")):
+            return "symptom"
+        if any(token in lowered for token in ("celebrity", "before and after", "transformation")):
+            return "celebrity"
+        return "review"
+
+    def _heading_subject(self, keyword: str) -> str:
+        parent = getattr(super(), "_heading_subject", None)
+        if callable(parent):
+            try:
+                return str(parent(keyword))
+            except Exception:
+                pass
+        return re.sub(r"\s+", " ", keyword).strip().strip(" ?") or "this topic"
+
+    def _planning_sections_from_keyword(self, keyword: str, query_type: str) -> list[str]:
+        parent = getattr(super(), "_planning_sections_from_keyword", None)
+        if callable(parent):
+            try:
+                return list(parent(keyword, query_type))
+            except Exception:
+                pass
+        phrase = self._heading_subject(keyword)
+        if query_type == "comparison":
+            return [
+                f"What {phrase} Actually Looks Like Side By Side",
+                "Where The Tradeoff Gets Real",
+                "Who Usually Fits Each Option Better",
+                "The Downside That Changes The Decision",
+                "What To Check Before You Choose",
+            ]
+        if query_type == "symptom":
+            return [
+                f"What {phrase} May Be Trying To Tell You",
+                "Why This Pattern Gets Missed At First",
+                "The Clues That Matter More Than People Think",
+                "When This Stops Being Something To Brush Off",
+                "What To Do Next Instead Of Guessing",
+            ]
+        return [
+            f"The Real Process Behind {phrase}",
+            "Why The First Result Can Be Misleading",
+            "The Tradeoff Most People Miss",
+            "Who Is Most Likely To Regret It",
+            "What To Do Next Before You Commit",
+        ]
+
+    def _planning_key_points_from_keyword(self, keyword: str, query_type: str) -> list[str]:
+        parent = getattr(super(), "_planning_key_points_from_keyword", None)
+        if callable(parent):
+            try:
+                return list(parent(keyword, query_type))
+            except Exception:
+                pass
+        phrase = self._heading_subject(keyword)
+        return [
+            f"The useful answer on {phrase} depends on fit, friction, and what changes after the first few weeks.",
+            "The real-world process matters more than the clean promise in the headline.",
+            "Readers need concrete tradeoffs, warning signs, and a next-step plan.",
+            "A good decision should be based on sustainability, not only the first visible result.",
+        ]
+
+    def _default_author_bio(self, keyword: str) -> str:
+        parent = getattr(super(), "_default_author_bio", None)
+        if callable(parent):
+            try:
+                return str(parent(keyword))
+            except Exception:
+                pass
+        return "I write evidence-aware health and wellness explainers that translate search hype into practical, real-world decisions."
+
+    def _default_personal_story(self, keyword: str) -> str:
+        parent = getattr(super(), "_default_personal_story", None)
+        if callable(parent):
+            try:
+                return str(parent(keyword))
+            except Exception:
+                pass
+        phrase = self._heading_subject(keyword)
+        return f"I kept seeing {phrase} framed like a clean shortcut, but the more useful question is what actually happens once the process meets real life."
+
+    def _build_description(self, keyword: str) -> str:
+        parent = getattr(super(), "_build_description", None)
+        if callable(parent):
+            try:
+                return str(parent(keyword))
+            except Exception:
+                pass
+        return self._truncate_description(f"A real-world look at {keyword}, including process, tradeoffs, side effects, cost, and what to check before acting.")
+
+    def _call_gemini_with_retry(self, prompt: str, attempts: int = 2) -> str | None:
+        caller = getattr(self, "_call_gemini", None)
+        if not callable(caller):
+            return None
+        for _ in range(max(1, attempts)):
+            try:
+                text = caller(prompt)
+            except Exception:
+                text = None
+            if text and str(text).strip():
+                return str(text).strip()
+        return None
+
+    def _extract_markdown_body(self, text: str) -> str:
+        parent = getattr(super(), "_extract_markdown_body", None)
+        if callable(parent):
+            try:
+                return str(parent(text))
+            except Exception:
+                pass
+        text = str(text or "").strip()
+        text = re.sub(r"^```(?:markdown|md)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text)
+        return text.strip()
+
+    def _clean_segmented_section_body(self, text: str) -> str:
+        text = self._extract_markdown_body(text)
+        text = re.sub(r"^##\s+.*\n+", "", text, flags=re.MULTILINE).strip()
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    def _compose_section_paragraph(self, keyword: str, section: str, summary: str, key_points: list[str], index: int) -> str:
+        point = key_points[index % len(key_points)] if key_points else summary
+        return (
+            f"In practice, this part of {keyword} is where the simple answer starts to get more useful. {point} "
+            "The reader should not only ask whether the idea sounds promising, but what changes after the first few days, what friction appears, and what would make the plan hard to sustain.\n\n"
+            "A realistic scenario usually looks less polished than the headline. The first week may feel clear because motivation is high. By the second or third week, the real test is whether the routine still works with normal meals, work stress, cost, symptoms, travel, or social pressure. That turning point is where a good decision becomes more practical than a good promise."
+        )
+
     def _build_expert_process_opening(self, keyword: str, summary: str, personal_story: str) -> str:
         search_line = (
             f"Searching {keyword} usually means the reader is not looking for a dictionary definition. "
@@ -222,10 +396,7 @@ class EditorialPipelineController(PipelineController):
             f"Recent context:\n{prior_context}\n\n"
             "Return plain markdown only."
         )
-        text = self._call_gemini_with_retry(prompt, attempts=2)
-        if not text:
-            return None
-        return text
+        return self._call_gemini_with_retry(prompt, attempts=2)
 
     def _repair_section_if_needed(self, keyword: str, body: str, index: int, total: int) -> str:
         repaired = body.strip()
@@ -292,12 +463,7 @@ class EditorialPipelineController(PipelineController):
         parts = re.split(r"^###\s+.+$", faq, flags=re.MULTILINE)[1:]
         if len(parts) < 4:
             return False
-        short_answers = 0
-        for answer in parts[:4]:
-            words = re.findall(r"\b\w+\b", answer)
-            if len(words) < 80:
-                short_answers += 1
-        return short_answers == 0
+        return all(len(re.findall(r"\b\w+\b", answer)) >= 80 for answer in parts[:4])
 
     def _fallback_faq(self, keyword: str) -> str:
         subject = self._heading_subject(keyword)
