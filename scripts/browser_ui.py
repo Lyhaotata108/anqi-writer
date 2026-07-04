@@ -8,13 +8,15 @@ Run:
 Then open:
     http://127.0.0.1:8765
 
-This browser UI supports three category keyword buckets and batch generation.
-It avoids macOS Tkinter rendering issues by using a local HTTP server.
+This browser UI supports three category keyword buckets, deterministic content
+brief generation, batch article generation, markdown preview, quality scoring,
+and CMS import.
 """
 
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 from datetime import datetime
 import json
 from pathlib import Path
@@ -26,13 +28,17 @@ import uuid
 import webbrowser
 
 from editorial_pipeline_controller import EditorialPipelineController, PipelineResult
+from quality_guard import evaluate_markdown
+from variation_engine import build_prompt_brief, build_variation_brief
 
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 WORKSPACE_ROOT = Path("/Users/hjg/Documents/anqicms-writer")
 OUTPUT_ROOT = WORKSPACE_ROOT
+BRIEF_ROOT = WORKSPACE_ROOT / "output" / "briefs"
 DEFAULT_CATEGORY_IDS = [1, 5, 9]
+QUALITY_MIN_SCORE = 85
 
 JOBS: dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
@@ -56,6 +62,7 @@ INDEX_HTML = r"""<!doctype html>
       --green: #166534;
       --red: #991b1b;
       --blue: #1d4ed8;
+      --amber: #92400e;
     }
     * { box-sizing: border-box; }
     body { margin: 0; font-family: Arial, Helvetica, sans-serif; background: var(--bg); color: var(--text); }
@@ -85,10 +92,12 @@ INDEX_HTML = r"""<!doctype html>
     .main { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 18px; }
     .panel-title { margin: 0 0 10px; font-size: 15px; font-weight: 800; }
     pre, .markdown-box { width: 100%; min-height: 500px; border: 1px solid var(--border); border-radius: 12px; background: #fff; color: var(--text); padding: 14px; white-space: pre-wrap; word-break: break-word; overflow: auto; font-family: Menlo, Consolas, monospace; font-size: 13px; line-height: 1.55; margin: 0; }
-    .summary { min-height: 150px; max-height: 230px; margin-bottom: 12px; }
+    .summary { min-height: 150px; max-height: 260px; margin-bottom: 12px; }
     .tiny { color: var(--muted); font-size: 12px; margin-top: 8px; line-height: 1.5; }
     .result-list { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px; }
     .result-link { display: inline-block; padding: 6px 9px; border-radius: 8px; background: #eef2ff; color: #1d4ed8; text-decoration: none; font-size: 12px; font-weight: 700; }
+    .result-link.warn { background: #fef3c7; color: var(--amber); }
+    .result-link.fail { background: #fee2e2; color: var(--red); }
     .err { color: var(--red); font-weight: 700; }
     .ok { color: var(--green); font-weight: 700; }
     @media (max-width: 1000px) { .category-grid { grid-template-columns: 1fr; } .status-row { grid-template-columns: 1fr; } .main { grid-template-columns: 1fr; } pre, .markdown-box { min-height: 320px; } }
@@ -98,7 +107,7 @@ INDEX_HTML = r"""<!doctype html>
   <div class="wrap">
     <div class="header">
       <h1>AnQiCMS Batch Generator</h1>
-      <div class="sub">Category mapping: 1 减肥药 · 5 CBD · 9 Blood · batch keywords · markdown preview · CMS import</div>
+      <div class="sub">Category mapping: 1 减肥药 · 5 CBD · 9 Blood · brief injection · quality guard · markdown preview · CMS import</div>
     </div>
 
     <div class="card">
@@ -133,7 +142,7 @@ INDEX_HTML = r"""<!doctype html>
         <button id="startBtn" onclick="startBatchGeneration()">Start Batch Generation</button>
         <button class="secondary" onclick="fillDemo()">Fill Demo</button>
         <button class="secondary" onclick="clearAll()">Clear</button>
-        <span class="tiny">批量规则：每行一个关键词；系统会按所属分类 ID 逐个生成 `.md`。分类：1=减肥药，5=CBD，9=Blood。</span>
+        <span class="tiny">建议输入聚类后的 `.to_generate.txt` 主关键词；生成前会保存 brief，生成后会自动质量评分。</span>
       </div>
 
       <div class="status-row">
@@ -193,7 +202,7 @@ function setStatus(text, percent) {
 }
 
 function fillDemo() {
-  document.getElementById('keywords1').value = 'mounjaro weight loss\nweight loss medication side effects';
+  document.getElementById('keywords1').value = 'berberine weight loss\nmetformin weight loss\nmounjaro weight loss';
   document.getElementById('keywords2').value = 'cbd gummies for sleep\ncbd oil side effects';
   document.getElementById('keywords3').value = 'cholesterol symptoms\nblood sugar after eating';
 }
@@ -211,9 +220,11 @@ function renderResultLinks(results) {
   currentResults.forEach((item, index) => {
     const a = document.createElement('a');
     a.className = 'result-link';
+    if (item.quality_passed === false) a.className += ' fail';
+    else if ((item.quality_score || 0) < 90) a.className += ' warn';
     a.href = '/preview?job_id=' + encodeURIComponent(currentJobId) + '&index=' + index;
     a.target = '_blank';
-    a.textContent = (index + 1) + '. ' + item.keyword + ' · cat ' + item.category_id;
+    a.textContent = (index + 1) + '. ' + item.keyword + ' · Q' + (item.quality_score || '?') + ' · cat ' + item.category_id;
     box.appendChild(a);
   });
 }
@@ -388,6 +399,31 @@ def _parse_tasks(payload: dict) -> list[dict]:
     return tasks
 
 
+def _slugify(text: str) -> str:
+    return "-".join(part for part in "".join(ch.lower() if ch.isalnum() else " " for ch in text).split() if part) or "article"
+
+
+def _save_variation_brief(keyword: str) -> tuple[Path, Path, dict, str]:
+    BRIEF_ROOT.mkdir(parents=True, exist_ok=True)
+    slug = _slugify(keyword)
+    brief = build_variation_brief(keyword)
+    brief_json = asdict(brief)
+    prompt_brief = build_prompt_brief(keyword)
+    json_path = BRIEF_ROOT / f"ui_{slug}.brief.json"
+    txt_path = BRIEF_ROOT / f"ui_{slug}.brief.txt"
+    json_path.write_text(json.dumps(brief_json, ensure_ascii=False, indent=2), encoding="utf-8")
+    txt_path.write_text(prompt_brief + "\n", encoding="utf-8")
+    return json_path, txt_path, brief_json, prompt_brief
+
+
+def _quality_payload(markdown_path: Path) -> dict:
+    report = evaluate_markdown(markdown_path, corpus_dir=OUTPUT_ROOT, min_score=QUALITY_MIN_SCORE)
+    payload = asdict(report)
+    payload["score"] = int(payload.get("score") or 0)
+    payload["passed"] = bool(payload.get("passed"))
+    return payload
+
+
 def _run_batch_generation(job_id: str, tasks: list[dict]) -> None:
     try:
         total = len(tasks)
@@ -402,15 +438,37 @@ def _run_batch_generation(job_id: str, tasks: list[dict]) -> None:
             base = 5 + int((index - 1) * 90 / total)
             span = max(1, int(90 / total))
             _append_log(job_id, f"[Batch] {index}/{total} · category {category_id} · {keyword}")
-            _update_job(job_id, stage="Batch", percent=base, message=f"Generating {index}/{total}: {keyword}")
+            _update_job(job_id, stage="Brief", percent=base, message=f"Building brief {index}/{total}: {keyword}")
+
+            brief_json_path, brief_txt_path, brief_json, _prompt_brief = _save_variation_brief(keyword)
+            _append_log(
+                job_id,
+                "[Brief] "
+                f"lane={brief_json.get('lane')} · entity={brief_json.get('entity')} · "
+                f"intent={brief_json.get('intent')} · scene={brief_json.get('scene')} · "
+                f"brief={brief_txt_path.name}",
+            )
 
             result: PipelineResult = CONTROLLER.run_generation(
                 keyword,
                 category_id=category_id,
                 keyword_id=None,
-                progress=_progress(job_id, base=base, span=span),
+                progress=_progress(job_id, base=base, span=max(1, span - 5)),
             )
             markdown = result.markdown_path.read_text(encoding="utf-8")
+
+            _update_job(job_id, stage="Quality_Guard", percent=min(99, base + span), message=f"Checking quality: {keyword}")
+            quality = _quality_payload(result.markdown_path)
+            score = int(quality.get("score") or 0)
+            passed = bool(quality.get("passed"))
+            if passed:
+                _append_log(job_id, f"[Quality PASS] {keyword} · score={score}")
+            else:
+                issues = quality.get("issues") or []
+                _append_log(job_id, f"[Quality FAIL] {keyword} · score={score} · issues={len(issues)}")
+                for issue in issues[:5]:
+                    _append_log(job_id, f"  - {issue}")
+
             item = {
                 "index": index - 1,
                 "keyword": keyword,
@@ -420,19 +478,31 @@ def _run_batch_generation(job_id: str, tasks: list[dict]) -> None:
                 "description": result.description,
                 "markdown_path": str(result.markdown_path),
                 "preview_path": str(result.preview_path),
+                "brief_json_path": str(brief_json_path),
+                "brief_txt_path": str(brief_txt_path),
+                "brief": brief_json,
+                "quality_score": score,
+                "quality_passed": passed,
+                "quality_issues": quality.get("issues") or [],
+                "quality_warnings": quality.get("warnings") or [],
+                "quality_stats": quality.get("stats") or {},
             }
             results.append(item)
-            combined_markdown_parts.append(f"<!-- {index}. {keyword} · category {category_id} -->\n\n{markdown}")
+            combined_markdown_parts.append(f"<!-- {index}. {keyword} · category {category_id} · quality {score} -->\n\n{markdown}")
             summary_text = _build_summary_text(results, total)
             _update_job(job_id, results=results, summary_text=summary_text, markdown="\n\n\n".join(combined_markdown_parts))
             _append_log(job_id, f"[Done] {keyword} -> {result.markdown_path}")
 
+        failed_quality = sum(1 for item in results if not item.get("quality_passed"))
+        final_message = f"Batch completed: {len(results)}/{total} generated"
+        if failed_quality:
+            final_message += f" · quality warnings/failures: {failed_quality}"
         _update_job(
             job_id,
             status="done",
             stage="Done",
             percent=100,
-            message=f"Batch completed: {len(results)}/{total} generated",
+            message=final_message,
             results=results,
             summary_text=_build_summary_text(results, total),
             markdown="\n\n\n".join(combined_markdown_parts),
@@ -445,17 +515,24 @@ def _run_batch_generation(job_id: str, tasks: list[dict]) -> None:
 
 
 def _build_summary_text(results: list[dict], total: int) -> str:
-    lines = [f"Generated {len(results)}/{total} articles", ""]
+    passed = sum(1 for item in results if item.get("quality_passed"))
+    failed = len(results) - passed
+    lines = [f"Generated {len(results)}/{total} articles", f"Quality: {passed} passed · {failed} needs review", ""]
     for item in results:
-        lines.append(f"{item['index'] + 1}. [{item['category_id']}] {item['keyword']}")
+        status = "PASS" if item.get("quality_passed") else "REVIEW"
+        lines.append(f"{item['index'] + 1}. [{item['category_id']}] {item['keyword']} · Q{item.get('quality_score', '?')} · {status}")
         lines.append(f"   Title: {item.get('title', '')}")
+        lines.append(f"   Brief: {item.get('brief_txt_path', '')}")
         lines.append(f"   Markdown: {item.get('markdown_path', '')}")
         lines.append(f"   Preview: {item.get('preview_path', '')}")
+        issues = item.get("quality_issues") or []
+        if issues:
+            lines.append("   Issues: " + " | ".join(str(issue) for issue in issues[:3]))
     return "\n".join(lines)
 
 
 class BrowserUIHandler(BaseHTTPRequestHandler):
-    server_version = "AnQiCMSBrowserUI/2.1"
+    server_version = "AnQiCMSBrowserUI/2.2"
 
     def log_message(self, format: str, *args) -> None:
         message = format % args
@@ -551,6 +628,8 @@ class BrowserUIHandler(BaseHTTPRequestHandler):
             publish_results = []
             try:
                 for index, item in enumerate(results, start=1):
+                    if item.get("quality_passed") is False:
+                        _append_log(job_id, f"[Publish Warning] {item.get('keyword')} quality score {item.get('quality_score')} needs review")
                     markdown_path = Path(item["markdown_path"])
                     _append_log(job_id, f"[Publish] {index}/{len(results)} · {markdown_path.name}")
                     result = CONTROLLER.publish_existing(markdown_path, progress=_progress(job_id, base=0, span=100))
