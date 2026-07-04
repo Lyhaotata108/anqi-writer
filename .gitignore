@@ -9,7 +9,10 @@ venv/
 
 # Local secrets
 .env
+local_api_keys.json
+local_api_keys.private.json
 scripts/local_api_keys.json
+scripts/local_api_keys.private.json
 
 # Local editor / assistant state
 .claude/settings.local.json
