@@ -6,12 +6,11 @@ Batch design:
 - One article = one API request.
 - Outputs are written immediately so interrupted runs can resume.
 - Existing Markdown files are skipped unless --overwrite is set.
-- The API key is read from --api-key or OPENAI_API_KEY.
-- The API base URL is read from --api-base or OPENAI_BASE_URL.
-- The model is read from --model or OPENAI_MODEL.
+- Supports Gemini relay values: GEMINI_BASE_URL, GEMINI_API_KEY, GEMINI_MODEL.
+- Supports YouTube Data API snippets as optional audience/context input.
 
-This script is intentionally provider-light: it uses only Python's standard
-library and the common /v1/chat/completions interface.
+This script is provider-light: it uses only Python's standard library and the
+common OpenAI-compatible /v1/chat/completions interface.
 """
 
 from __future__ import annotations
@@ -24,6 +23,7 @@ import os
 import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -62,6 +62,42 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None
         writer.writerows(rows)
 
 
+def load_config(path: str | Path) -> dict[str, str]:
+    config_path = Path(path)
+    if not config_path.exists():
+        return {}
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): str(v) for k, v in data.items() if v is not None}
+
+
+def choose_value(cli_value: str, env_names: list[str], config: dict[str, str], config_names: list[str], default: str = "") -> str:
+    if cli_value:
+        return cli_value
+    for name in env_names:
+        value = os.getenv(name, "")
+        if value:
+            return value
+    for name in config_names:
+        value = config.get(name, "")
+        if value and not value.startswith("paste-your-"):
+            return value
+    return default
+
+
+def chat_completion_url(api_base: str) -> str:
+    base = str(api_base or "").rstrip("/")
+    if base.endswith("/chat/completions"):
+        return base
+    if base.endswith("/v1"):
+        return f"{base}/chat/completions"
+    return f"{base}/v1/chat/completions"
+
+
 def clean_category(row: dict[str, str]) -> str:
     raw = str(row.get("category") or "weight_loss").strip().lower().replace("-", "_").replace(" ", "_")
     if raw in {"cbd", "hemp"}:
@@ -85,7 +121,7 @@ def front_matter(row: dict[str, str], slug: str, status: str) -> str:
         f"primary_keyword: \"{normalize(row.get('keyword'))}\"",
         f"body_template: \"{normalize(row.get('body_template'))}\"",
         f"target_word_count: \"{normalize(row.get('target_word_count'))}\"",
-        f"generation: \"ai\"",
+        "generation: \"ai\"",
         f"status: \"{status}\"",
         "---",
         "",
@@ -126,6 +162,51 @@ def blueprint_summary(row: dict[str, str]) -> str:
     return "\n".join(lines)
 
 
+def youtube_search(api_key: str, query: str, max_results: int = 5) -> list[dict[str, str]]:
+    if not api_key:
+        return []
+    params = urllib.parse.urlencode({
+        "part": "snippet",
+        "q": query,
+        "type": "video",
+        "maxResults": max(1, min(int(max_results or 5), 10)),
+        "order": "relevance",
+        "safeSearch": "moderate",
+        "key": api_key,
+    })
+    url = f"https://www.googleapis.com/youtube/v3/search?{params}"
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8")
+        data = json.loads(raw)
+    except Exception:
+        return []
+    results = []
+    for item in data.get("items", []):
+        snippet = item.get("snippet", {})
+        video_id = item.get("id", {}).get("videoId", "")
+        results.append({
+            "title": normalize(snippet.get("title", "")),
+            "channel": normalize(snippet.get("channelTitle", "")),
+            "description": normalize(snippet.get("description", ""))[:280],
+            "video_id": video_id,
+        })
+    return results
+
+
+def youtube_context_text(results: list[dict[str, str]]) -> str:
+    if not results:
+        return ""
+    lines = ["YouTube audience/context signals. Use these only for angle, phrasing, objections, and FAQ inspiration. Do not cite them as medical proof:"]
+    for i, item in enumerate(results, start=1):
+        lines.append(f"{i}. Title: {item.get('title', '')}")
+        lines.append(f"   Channel: {item.get('channel', '')}")
+        if item.get("description"):
+            lines.append(f"   Description: {item.get('description')}")
+    return "\n".join(lines)
+
+
 def system_prompt(category: str) -> str:
     base = (
         "You are an expert SEO editorial writer. Write publishable Markdown articles that feel like human expert-led editorial content, not template filler. "
@@ -141,7 +222,7 @@ def system_prompt(category: str) -> str:
     return base + " For weight-loss content, be realistic about mechanisms, adherence, side effects, cost, maintenance, and clinician guidance for medications or supplements."
 
 
-def user_prompt(row: dict[str, str]) -> str:
+def user_prompt(row: dict[str, str], youtube_context: str = "") -> str:
     category = clean_category(row)
     target = normalize(row.get("target_word_count") or "2400")
     title = normalize(row.get("title") or row.get("keyword"))
@@ -159,6 +240,7 @@ def user_prompt(row: dict[str, str]) -> str:
             "Avoid diagnosis and avoid telling the reader to self-treat abnormal results."
         ),
     }
+    yt_block = f"\n\nYouTube context:\n{youtube_context}\n" if youtube_context else ""
     return f"""
 Write a complete publish-ready Markdown article.
 
@@ -171,7 +253,7 @@ Last updated: {today_label()}
 Target length: about {target} words. It is better to be specific and non-repetitive than padded.
 
 Blueprint:
-{blueprint_summary(row)}
+{blueprint_summary(row)}{yt_block}
 
 Style requirements:
 - Start with a search-intent hook, not a dictionary definition.
@@ -197,25 +279,22 @@ def call_chat_completion(
     row: dict[str, str],
     temperature: float,
     timeout: int,
+    youtube_context: str = "",
 ) -> str:
-    api_base = api_base.rstrip("/")
-    url = f"{api_base}/chat/completions"
+    url = chat_completion_url(api_base)
     payload = {
         "model": model,
         "temperature": temperature,
         "messages": [
             {"role": "system", "content": system_prompt(clean_category(row))},
-            {"role": "user", "content": user_prompt(row)},
+            {"role": "user", "content": user_prompt(row, youtube_context)},
         ],
     }
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url,
         data=data,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
         method="POST",
     )
     try:
@@ -226,7 +305,6 @@ def call_chat_completion(
         raise RuntimeError(f"API HTTP {exc.code}: {body[:800]}") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"API request failed: {exc}") from exc
-
     parsed = json.loads(raw)
     try:
         return parsed["choices"][0]["message"]["content"]
@@ -248,6 +326,20 @@ def clean_markdown(markdown: str, row: dict[str, str]) -> str:
     if not text.startswith("---"):
         text = front_matter(row, slug, "draft_ready") + text
     return text.strip() + "\n"
+
+
+def repeated_paragraph_count(markdown: str) -> int:
+    paras = [re.sub(r"\s+", " ", p.strip().lower()) for p in markdown.split("\n\n")]
+    paras = [p for p in paras if len(p) > 120 and not p.startswith("|")]
+    seen: set[str] = set()
+    repeated = 0
+    for para in paras:
+        key = para[:240]
+        if key in seen:
+            repeated += 1
+        else:
+            seen.add(key)
+    return repeated
 
 
 def quality_check(markdown: str, row: dict[str, str]) -> tuple[str, bool, list[str]]:
@@ -276,28 +368,18 @@ def quality_check(markdown: str, row: dict[str, str]) -> tuple[str, bool, list[s
     return status, status == "PASS", notes
 
 
-def repeated_paragraph_count(markdown: str) -> int:
-    paras = [re.sub(r"\s+", " ", p.strip().lower()) for p in markdown.split("\n\n")]
-    paras = [p for p in paras if len(p) > 120 and not p.startswith("|")]
-    seen: set[str] = set()
-    repeated = 0
-    for para in paras:
-        key = para[:240]
-        if key in seen:
-            repeated += 1
-        else:
-            seen.add(key)
-    return repeated
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate AI Markdown articles from body_blueprint CSV.")
     parser.add_argument("input", help="Input body_blueprint_audit CSV")
     parser.add_argument("--articles-dir", default=DEFAULT_ARTICLES_DIR)
     parser.add_argument("--queue-output", default=DEFAULT_QUEUE_OUTPUT)
-    parser.add_argument("--api-key", default=os.getenv("OPENAI_API_KEY", ""))
-    parser.add_argument("--api-base", default=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"))
-    parser.add_argument("--model", default=os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
+    parser.add_argument("--config", default="local_api_keys.json")
+    parser.add_argument("--api-key", default="")
+    parser.add_argument("--api-base", default="")
+    parser.add_argument("--model", default="")
+    parser.add_argument("--youtube-api-key", default="")
+    parser.add_argument("--use-youtube-context", action="store_true")
+    parser.add_argument("--youtube-max-results", type=int, default=5)
     parser.add_argument("--temperature", type=float, default=float(os.getenv("AI_TEMPERATURE", "0.65")))
     parser.add_argument("--timeout", type=int, default=int(os.getenv("AI_TIMEOUT", "180")))
     parser.add_argument("--sleep", type=float, default=float(os.getenv("AI_SLEEP", "0.5")))
@@ -305,8 +387,17 @@ def main() -> int:
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
-    if not args.api_key:
-        raise SystemExit("Missing API key. Set OPENAI_API_KEY or pass --api-key.")
+    config = load_config(args.config)
+    if not config and args.config == "local_api_keys.json":
+        config = load_config("scripts/local_api_keys.json")
+
+    api_key = choose_value(args.api_key, ["GEMINI_API_KEY", "OPENAI_API_KEY"], config, ["GEMINI_API_KEY", "OPENAI_API_KEY"])
+    api_base = choose_value(args.api_base, ["GEMINI_BASE_URL", "OPENAI_BASE_URL"], config, ["GEMINI_BASE_URL", "OPENAI_BASE_URL"], "https://api.openai.com/v1")
+    model = choose_value(args.model, ["GEMINI_MODEL", "OPENAI_MODEL"], config, ["GEMINI_MODEL", "OPENAI_MODEL"], "gpt-4o-mini")
+    youtube_api_key = choose_value(args.youtube_api_key, ["YOUTUBE_DATA_API_KEY"], config, ["YOUTUBE_DATA_API_KEY"])
+
+    if not api_key:
+        raise SystemExit("Missing API key. Set GEMINI_API_KEY/OPENAI_API_KEY, put it in local_api_keys.json, or pass --api-key.")
 
     input_path = Path(args.input)
     if not input_path.exists():
@@ -325,6 +416,7 @@ def main() -> int:
         path = article_dir / f"{slug}.md"
         generation_status = "generated"
         error_message = ""
+        yt_results: list[dict[str, str]] = []
 
         if path.exists() and not args.overwrite:
             markdown = path.read_text(encoding="utf-8", errors="ignore")
@@ -332,11 +424,16 @@ def main() -> int:
         else:
             try:
                 print(f"[{idx}/{len(source_rows)}] Generating: {title}")
-                raw = call_chat_completion(args.api_key, args.api_base, args.model, row, args.temperature, args.timeout)
+                youtube_context = ""
+                if args.use_youtube_context and youtube_api_key:
+                    query = f"{row.get('keyword', title)} {clean_category(row).replace('_', ' ')}"
+                    yt_results = youtube_search(youtube_api_key, query, args.youtube_max_results)
+                    youtube_context = youtube_context_text(yt_results)
+                raw = call_chat_completion(api_key, api_base, model, row, args.temperature, args.timeout, youtube_context)
                 markdown = clean_markdown(raw, row)
                 path.write_text(markdown, encoding="utf-8")
                 time.sleep(args.sleep)
-            except Exception as exc:  # noqa: BLE001 - batch should continue per row
+            except Exception as exc:  # noqa: BLE001
                 markdown = ""
                 generation_status = "error"
                 error_message = str(exc)[:1200]
@@ -356,16 +453,21 @@ def main() -> int:
             "word_count": wc,
             "target_word_count": row.get("target_word_count", ""),
             "body_template": row.get("body_template", ""),
+            "api_model": model,
             "generation_status": generation_status,
+            "youtube_results_count": len(yt_results),
             "quality_status": quality_status,
             "publish_ready": "yes" if publish_ready else "review",
             "quality_notes": " | ".join(notes),
         })
 
-    fields = ["category", "keyword", "title", "slug", "markdown_path", "word_count", "target_word_count", "body_template", "generation_status", "quality_status", "publish_ready", "quality_notes"]
+    fields = ["category", "keyword", "title", "slug", "markdown_path", "word_count", "target_word_count", "body_template", "api_model", "generation_status", "youtube_results_count", "quality_status", "publish_ready", "quality_notes"]
     write_csv(Path(args.queue_output), queue_rows, fields)
     pass_count = sum(1 for row in queue_rows if row["quality_status"] == "PASS")
     errors = sum(1 for row in queue_rows if row["quality_status"] == "ERROR")
+    print(f"Model: {model}")
+    print(f"API base: {api_base}")
+    print(f"YouTube context: {'on' if args.use_youtube_context and youtube_api_key else 'off'}")
     print(f"Wrote {len(queue_rows)} queue rows to {args.queue_output}")
     print(f"Articles directory: {article_dir}")
     print(f"Quality: {pass_count} PASS · {len(queue_rows) - pass_count - errors} REVIEW · {errors} ERROR")
