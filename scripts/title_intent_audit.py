@@ -11,7 +11,7 @@ import sys
 
 from title_engine import generate_title_metadata
 from title_intent_classifier import classify_title_intent
-from title_scorer import title_frame_key
+from title_scorer import title_frame_key, title_shape_key
 
 
 def read_keywords(path: Path) -> list[str]:
@@ -34,6 +34,7 @@ def main() -> int:
     used_patterns = set()
     seen_clusters = {}
     seen_frames = {}
+    seen_shapes = {}
     for keyword in read_keywords(input_path):
         intent = classify_title_intent(keyword)
         meta = generate_title_metadata(keyword, classification=asdict(intent), existing_titles=used_titles, existing_patterns=used_patterns)
@@ -49,6 +50,9 @@ def main() -> int:
         if not frame_first_keyword:
             seen_frames[frame_key] = keyword
 
+        shape_key = meta.get("title_shape") or title_shape_key(meta["title"])
+        seen_shapes[shape_key] = seen_shapes.get(shape_key, 0) + 1
+
         used_titles.append(meta["title"])
         used_patterns.add(meta["pattern"])
         rows.append({
@@ -61,6 +65,7 @@ def main() -> int:
             "title_frame_key": frame_key,
             "title_frame_status": frame_status,
             "title_frame_first_keyword": frame_first_keyword,
+            "title_shape": shape_key,
             "intent_family": intent.intent_family,
             "entity_type": intent.entity_type,
             "modifier": intent.modifier,
@@ -82,7 +87,7 @@ def main() -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     fields = [
         "keyword", "canonical_subject", "canonical_question", "cluster_key", "cluster_status",
-        "cluster_first_keyword", "title_frame_key", "title_frame_status", "title_frame_first_keyword",
+        "cluster_first_keyword", "title_frame_key", "title_frame_status", "title_frame_first_keyword", "title_shape",
         "intent_family", "entity_type", "modifier", "page_type",
         "ctr_angle", "click_trigger", "risk_trigger", "specificity_score",
         "title_family", "pattern_id", "technical_score", "ctr_score", "title_score", "title", "reason",
@@ -95,9 +100,11 @@ def main() -> int:
     duplicate_count = sum(1 for row in rows if row["cluster_status"] == "duplicate")
     reused_frames = sum(1 for row in rows if row["title_frame_status"] == "reused_frame")
     low_ctr = sum(1 for row in rows if int(row["ctr_score"] or 0) < 75)
+    shape_summary = ", ".join(f"{k}:{v}" for k, v in sorted(seen_shapes.items()))
     print(f"Wrote {len(rows)} rows to {out}")
     print(f"Clusters: {len(seen_clusters)} primary · {duplicate_count} duplicate")
     print(f"Frames: {len(seen_frames)} unique · {reused_frames} reused")
+    print(f"Shapes: {shape_summary}")
     print(f"Low CTR rows: {low_ctr}")
     return 0
 
