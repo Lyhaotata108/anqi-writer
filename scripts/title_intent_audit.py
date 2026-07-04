@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Audit title intent classification over a keyword seed file."""
+"""Audit title intent classification and CTR title output."""
 
 from __future__ import annotations
 from dataclasses import asdict
@@ -12,11 +12,13 @@ import sys
 from title_engine import generate_title_metadata
 from title_intent_classifier import classify_title_intent
 
+
 def read_keywords(path: Path) -> list[str]:
     return [line.strip() for line in path.read_text(encoding="utf-8", errors="ignore").splitlines() if line.strip()]
 
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Classify keyword title intents and preview generated titles.")
+    parser = argparse.ArgumentParser(description="Classify keyword title intents and preview CTR-first generated titles.")
     parser.add_argument("input", help="Plain-text keyword file, one keyword per line")
     parser.add_argument("--output", default="output/title_intent_audit.csv")
     args = parser.parse_args()
@@ -52,8 +54,14 @@ def main() -> int:
             "entity_type": intent.entity_type,
             "modifier": intent.modifier,
             "page_type": intent.page_type,
+            "ctr_angle": meta.get("ctr_angle"),
+            "click_trigger": meta.get("click_trigger"),
+            "risk_trigger": meta.get("risk_trigger"),
+            "specificity_score": meta.get("specificity_score"),
             "title_family": meta.get("family"),
             "pattern_id": meta.get("pattern"),
+            "technical_score": meta.get("technical_score"),
+            "ctr_score": meta.get("ctr_score"),
             "title_score": meta.get("score"),
             "title": meta.get("title"),
             "reason": meta.get("reason"),
@@ -64,7 +72,8 @@ def main() -> int:
     fields = [
         "keyword", "canonical_subject", "canonical_question", "cluster_key", "cluster_status",
         "cluster_first_keyword", "intent_family", "entity_type", "modifier", "page_type",
-        "title_family", "pattern_id", "title_score", "title", "reason",
+        "ctr_angle", "click_trigger", "risk_trigger", "specificity_score",
+        "title_family", "pattern_id", "technical_score", "ctr_score", "title_score", "title", "reason",
     ]
     with out.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -72,9 +81,12 @@ def main() -> int:
         writer.writerows(rows)
 
     duplicate_count = sum(1 for row in rows if row["cluster_status"] == "duplicate")
+    low_ctr = sum(1 for row in rows if int(row["ctr_score"] or 0) < 75)
     print(f"Wrote {len(rows)} rows to {out}")
     print(f"Clusters: {len(seen_clusters)} primary · {duplicate_count} duplicate")
+    print(f"Low CTR rows: {low_ctr}")
     return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
