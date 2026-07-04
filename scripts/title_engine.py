@@ -2,9 +2,8 @@
 # -*- coding: utf-8 -*-
 """CTR-first SEO title engine.
 
-V3.4 keeps the approved CTR style, adds composable fragment variants, and
-prefers a healthier mix of dash/question/editorial shapes instead of always
-falling back to colon headlines.
+V3.7 keeps the approved CTR style but improves title-shape balance and reduces
+mechanical dash overuse for large keyword batches.
 """
 
 from __future__ import annotations
@@ -20,7 +19,7 @@ from ctr_angle_classifier import CTRAngle, classify_ctr_angle
 from ctr_title_pattern_bank import CTR_STRONG_TOKENS, CTR_TITLE_PATTERNS, CTR_WEAK_PHRASES
 from title_intent_classifier import TitleIntent, classify_title_intent
 from title_pattern_bank import FAMILY_PRIORITY, TITLE_PATTERNS
-from title_scorer import TitleCandidate, score_title
+from title_scorer import TitleCandidate, score_title, title_shape_key
 from title_variant_generator import generate_fragment_variants
 
 
@@ -34,6 +33,7 @@ class TitleDecision:
     subject: str = ""
     question: str = ""
     cluster_key: str = ""
+    title_shape: str = ""
     technical_score: int = 0
     ctr_score: int = 0
     score: int = 0
@@ -114,6 +114,7 @@ def score_ctr_title(title: str, keyword: str, subject: str, angle: CTRAngle, tec
     title_l = norm_l(title)
     keyword_l = norm_l(keyword)
     subject_l = norm_l(subject)
+    shape = title_shape_key(title)
     score = 0
     reasons: list[str] = []
 
@@ -121,9 +122,12 @@ def score_ctr_title(title: str, keyword: str, subject: str, angle: CTRAngle, tec
         score += 14
         reasons.append("subject-front-loaded")
 
-    if 58 <= len(title) <= 112:
+    if 58 <= len(title) <= 108:
         score += 12
         reasons.append("ctr-length")
+    elif 48 <= len(title) <= 112:
+        score += 6
+        reasons.append("acceptable-length")
 
     strong_hits = [token for token in CTR_STRONG_TOKENS if token in title_l]
     if strong_hits:
@@ -148,15 +152,21 @@ def score_ctr_title(title: str, keyword: str, subject: str, angle: CTRAngle, tec
         score += 8
         reasons.append("click-structure")
 
-    if "—" in title and ":" not in title:
+    if shape == "question":
         score += 12
-        reasons.append("non-colon-dash-shape")
-    elif "?" in title and ":" not in title:
-        score += 10
-        reasons.append("non-colon-question-shape")
-    elif ":" in title and "—" not in title and "?" not in title:
-        score -= 12
-        reasons.append("colon-only-shape-penalty")
+        reasons.append("question-shape")
+    elif shape == "editorial":
+        score += 12
+        reasons.append("editorial-shape")
+    elif shape == "before":
+        score += 8
+        reasons.append("before-shape")
+    elif shape == "dash":
+        score += 5
+        reasons.append("dash-shape")
+    elif shape == "colon":
+        score += 2
+        reasons.append("colon-shape")
 
     if re.match(r"^(before you|i looked|i checked|i compared|what to know|why )\b", title_l):
         score += 8
@@ -223,7 +233,7 @@ def generate_ctr_title_candidates(
     for family, pattern_id, title in generate_fragment_variants(keyword, angle.ctr_angle, ctx, limit=80):
         append_ctr_candidate(
             candidates, title, family, pattern_id, keyword, subject, angle,
-            existing_titles, existing_patterns, "fragment-grammar", 0.22, 0.72, 4,
+            existing_titles, existing_patterns, "fragment-grammar", 0.24, 0.68, 4,
         )
 
     for family in [*angle.preferred_families, "hidden_context", "practical_filter"]:
@@ -232,7 +242,7 @@ def generate_ctr_title_candidates(
             title = pattern.format(**ctx)
             append_ctr_candidate(
                 candidates, title, family, pattern_id, keyword, subject, angle,
-                existing_titles, existing_patterns, "fixed-ctr-template", 0.28, 0.66, 0,
+                existing_titles, existing_patterns, "fixed-ctr-template", 0.30, 0.62, 0,
             )
 
     for family in candidate_families(intent):
@@ -241,7 +251,7 @@ def generate_ctr_title_candidates(
             title = pattern.format(**ctx)
             append_ctr_candidate(
                 candidates, title, family, pattern_id, keyword, subject, angle,
-                existing_titles, existing_patterns, "fallback-v2-pattern", 0.20, 0.48, -12,
+                existing_titles, existing_patterns, "fallback-v2-pattern", 0.20, 0.46, -14,
             )
 
     return sorted(candidates, key=lambda item: item.total_score, reverse=True)
@@ -265,6 +275,7 @@ def choose_title_pattern(keyword: str, article_type: str, classification: dict |
         subject=str(ctx["kw"]),
         question=str(ctx["question"]),
         cluster_key=cluster_key,
+        title_shape=title_shape_key(best.title),
         technical_score=best.technical_score,
         ctr_score=best.ctr_score,
         score=best.total_score,
