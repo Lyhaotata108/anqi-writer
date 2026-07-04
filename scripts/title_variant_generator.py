@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Composable CTR title variant generator for Title Engine V3.4.
+"""Composable CTR title variant generator for Title Engine V3.5.
 
-V3.4 adds non-colon headline shapes and fixes fragment joining so generated
-headlines avoid awkward text like "and and" or repeated "before" phrases.
+V3.5 keeps non-colon variety but filters awkward fragment joins such as repeated
+"before" clauses, double-dash titles, and unnatural "X in Subject" shapes.
 """
 
 from __future__ import annotations
@@ -14,18 +14,18 @@ from ctr_fragment_bank import ANGLE_GRAMMAR
 
 
 EXTRA_SHAPES_BY_ANGLE = {
-    "timeline": ["subject_dash", "lead_in_subject_dash", "question_dash"],
-    "before_buy": ["before_subject", "subject_dash", "lead_in_subject_dash"],
-    "hidden_catch": ["before_subject", "subject_dash", "lead_in_subject_dash"],
-    "reality_check_ctr": ["question_direct", "question_dash", "lead_in_subject_dash"],
-    "looked_into": ["editorial_dash", "lead_in_subject_dash", "subject_dash"],
-    "hidden_risk": ["subject_dash", "lead_in_subject_dash", "question_dash"],
-    "money_access": ["subject_dash", "lead_in_subject_dash", "before_subject"],
-    "comparison_decision": ["subject_dash", "lead_in_subject_dash", "question_dash"],
-    "public_claim": ["subject_dash", "lead_in_subject_dash"],
-    "before_next_dose": ["subject_dash", "before_subject", "lead_in_subject_dash"],
-    "practical_filter": ["subject_dash", "before_subject", "lead_in_subject_dash"],
-    "hidden_context": ["subject_dash", "lead_in_subject_dash", "question_dash"],
+    "timeline": ["subject_dash", "question_dash", "question_direct"],
+    "before_buy": ["subject_dash", "question_dash", "colon_dash"],
+    "hidden_catch": ["subject_dash", "question_dash", "before_subject"],
+    "reality_check_ctr": ["question_direct", "question_dash", "subject_dash"],
+    "looked_into": ["editorial_dash", "subject_dash", "question_dash"],
+    "hidden_risk": ["subject_dash", "question_dash", "question_direct"],
+    "money_access": ["subject_dash", "question_dash", "colon_dash"],
+    "comparison_decision": ["subject_dash", "question_dash", "question_direct"],
+    "public_claim": ["subject_dash", "question_dash"],
+    "before_next_dose": ["subject_dash", "question_dash", "before_subject"],
+    "practical_filter": ["subject_dash", "question_dash", "before_subject"],
+    "hidden_context": ["subject_dash", "question_dash", "question_direct"],
 }
 
 
@@ -62,18 +62,30 @@ def unique(items: list[str]) -> list[str]:
     return out
 
 
-def strip_leading_and(text: str) -> str:
-    return re.sub(r"^and\s+", "", normalize(text), flags=re.I)
+def strip_leading_connector(text: str) -> str:
+    text = normalize(text)
+    text = re.sub(r"^(and|but)\s+", "", text, flags=re.I)
+    return text
+
+
+def demote_before(text: str) -> str:
+    """Remove a leading transition when another before-clause already exists."""
+    text = strip_leading_connector(text)
+    text = re.sub(r"^before\s+", "", text, flags=re.I)
+    text = re.sub(r"^when\s+", "", text, flags=re.I)
+    text = re.sub(r"^once\s+", "", text, flags=re.I)
+    text = re.sub(r"^after\s+", "", text, flags=re.I)
+    return normalize(text)
 
 
 def phrase_sentence(lead: str, contrast: str) -> str:
     lead = normalize(lead)
     contrast = normalize(contrast)
     c_low = contrast.lower()
+    if " before " in lead.lower() and c_low.startswith("before "):
+        return f"{lead} — {cap_first(demote_before(contrast))}"
     if c_low.startswith("and "):
         return f"{lead} {contrast}"
-    if " before " in lead.lower() and c_low.startswith("before "):
-        return f"{lead} — {cap_first(contrast)}"
     return f"{lead} {contrast}"
 
 
@@ -90,28 +102,34 @@ def phrase_and(lead: str, contrast: str) -> str:
 
 def phrase_dash(lead: str, contrast: str) -> str:
     lead = normalize(lead)
-    contrast = cap_first(strip_leading_and(contrast))
+    contrast = cap_first(strip_leading_connector(contrast))
     return f"{lead} — {contrast}"
+
+
+def safe_question(question: str, subject: str) -> str:
+    question = normalize(question).rstrip("?")
+    subject = normalize(subject)
+    if len(question) > 72 or question.lower().count("for weight loss") > 1:
+        return f"Does {subject} Actually Work"
+    return question
 
 
 def build_title(subject: str, question: str, lead: str, contrast: str, shape: str) -> str:
     subject = normalize(subject)
-    question = normalize(question).rstrip("?")
+    question = safe_question(question, subject)
     lead = normalize(lead)
     contrast = normalize(contrast)
 
     if shape == "question_colon":
-        return f"{question}? {lead}: {cap_first(strip_leading_and(contrast))}"
+        return f"{question}? {lead}: {cap_first(strip_leading_connector(contrast))}"
     if shape == "question_dash":
         return f"{question}? {phrase_dash(lead, contrast)}"
     if shape == "question_direct":
         return f"{question}? {phrase_sentence(lead, contrast)}"
     if shape == "editorial_dash":
-        return f"{lead} on {subject} — {cap_first(strip_leading_and(contrast))}"
+        return f"{lead} on {subject} — {cap_first(strip_leading_connector(contrast))}"
     if shape == "subject_dash":
         return f"{subject} — {phrase_sentence(lead, contrast)}"
-    if shape == "lead_in_subject_dash":
-        return f"{lead} in {subject} — {cap_first(strip_leading_and(contrast))}"
     if shape == "before_subject":
         return f"Before You Try {subject}, {phrase_sentence(lead, contrast)}"
     if shape == "colon_before":
@@ -119,6 +137,31 @@ def build_title(subject: str, question: str, lead: str, contrast: str, shape: st
     if shape == "colon_and":
         return f"{subject}: {phrase_and(lead, contrast)}"
     return f"{subject}: {phrase_dash(lead, contrast)}"
+
+
+def has_repeated_transition(title: str) -> bool:
+    t = normalize(title).lower()
+    if t.count(" before ") >= 2:
+        return True
+    if t.count(" — ") >= 2:
+        return True
+    if re.search(r"before you try .+\bbefore\b", t):
+        return True
+    if re.search(r"\bthat\s+[—:]", t):
+        return True
+    return False
+
+
+def shape_allowed(shape: str, lead: str, contrast: str, angle: str) -> bool:
+    lead_l = lead.lower()
+    contrast_l = contrast.lower()
+    if shape == "before_subject" and ("before" in lead_l or contrast_l.startswith("before ")):
+        return False
+    if shape == "question_direct" and contrast_l.startswith("before ") and "before" in lead_l:
+        return False
+    if shape == "editorial_dash" and not re.match(r"^(i looked|i checked|i compared)\b", lead_l):
+        return False
+    return True
 
 
 def generate_fragment_variants(keyword: str, ctr_angle: str, ctx: dict, limit: int = 64) -> list[tuple[str, str, str]]:
@@ -131,7 +174,7 @@ def generate_fragment_variants(keyword: str, ctr_angle: str, ctx: dict, limit: i
     leads = rotate(list(grammar.get("lead", [])), keyword + ctr_angle + "lead")
     contrasts = rotate(list(grammar.get("contrast", [])), keyword + ctr_angle + "contrast")
     base_shapes = list(grammar.get("shape", []))
-    extra_shapes = EXTRA_SHAPES_BY_ANGLE.get(ctr_angle, ["subject_dash", "lead_in_subject_dash"])
+    extra_shapes = EXTRA_SHAPES_BY_ANGLE.get(ctr_angle, ["subject_dash", "question_dash"])
     shapes = rotate(unique(extra_shapes + base_shapes), keyword + ctr_angle + "shape")
     out: list[tuple[str, str, str]] = []
     seen: set[str] = set()
@@ -141,7 +184,11 @@ def generate_fragment_variants(keyword: str, ctr_angle: str, ctx: dict, limit: i
             for shape in shapes:
                 if len(out) >= limit:
                     return out
+                if not shape_allowed(shape, lead, contrast, ctr_angle):
+                    continue
                 title = build_title(subject, question, lead, contrast, shape)
+                if has_repeated_transition(title):
+                    continue
                 key = normalize(title).lower()
                 if key in seen:
                     continue
