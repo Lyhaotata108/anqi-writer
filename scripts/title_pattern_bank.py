@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-TITLE_PATTERNS: dict[str, list[str]] = {
+TITLE_PATTERNS = {
     "glp1_medication": [
         "{kw}: What Happens After the First 12 Weeks",
         "{kw}: Results, Rebound Risk & What Users Should Track",
@@ -30,6 +30,26 @@ TITLE_PATTERNS: dict[str, list[str]] = {
         "{kw}: What To Know Before Moving Up",
         "{kw}: Starting Low, Moving Up & What Not To Rush",
         "{kw}: Units, Timing & The Mistake That Changes Results",
+    ],
+    "timing_guide": [
+        "{kw}: Best Time, Results Window & What To Track",
+        "{kw}: Timing, Side Effects & The Mistake People Make",
+        "{kw}: When It Starts Working and What To Watch",
+        "{kw}: How Long It Takes and What Can Change The Timeline",
+        "{kw}: Timing Reality, Plateau Risk & What To Measure",
+        "{kw}: Before-or-After Questions and The Practical Answer",
+        "{kw}: The Results Window People Misread",
+        "{kw}: When To Take It and When To Recheck The Plan",
+    ],
+    "injection_site": [
+        "{kw}: Site Choice, Comfort & The Safety Check",
+        "{kw}: Where To Inject, What To Rotate & What To Avoid",
+        "{kw}: Injection Site, Timing & The Mistake People Make",
+        "{kw}: Site Rotation, Side Effects & What To Ask First",
+        "{kw}: The Practical Injection-Site Guide People Need",
+        "{kw}: Stomach vs Thigh, Comfort & What To Track",
+        "{kw}: Where The Shot Goes and Why Rotation Matters",
+        "{kw}: Injection-Site Reality Check Before Your Next Dose",
     ],
     "reviews_results": [
         "{kw}: What Users Report After the Hype",
@@ -263,14 +283,16 @@ TITLE_PATTERNS: dict[str, list[str]] = {
     ],
 }
 
-FAMILY_PRIORITY: dict[str, list[str]] = {
+FAMILY_PRIORITY = {
     "glp1_medication": ["glp1_medication", "reviews_results", "claim_filter"],
     "dosage": ["dosage", "safety", "glp1_medication"],
-    "reviews_results": ["reviews_results", "reality_check", "claim_filter"],
+    "timing_guide": ["timing_guide", "dosage", "claim_filter"],
+    "injection_site": ["injection_site", "safety", "dosage"],
+    "reviews_results": ["reviews_results", "claim_filter", "reality_check"],
     "does_it_work": ["reality_check", "claim_filter", "reviews_results"],
     "best_top": ["ranked_review", "comparison", "claim_filter"],
     "safety": ["safety", "claim_filter", "reality_check"],
-    "viral_recipe": ["viral_recipe", "reality_check", "claim_filter"],
+    "viral_recipe": ["viral_recipe", "claim_filter", "reality_check"],
     "pills_commercial": ["pills_commercial", "safety", "ranked_review"],
     "supplement_commercial": ["supplement_commercial", "claim_filter", "safety"],
     "high_protein": ["high_protein", "whole_food", "claim_filter"],
@@ -282,31 +304,28 @@ FAMILY_PRIORITY: dict[str, list[str]] = {
     "oil_fat": ["oil_fat", "claim_filter", "reality_check"],
     "probiotic": ["probiotic", "claim_filter", "reviews_results"],
     "whole_food": ["whole_food", "claim_filter", "reality_check"],
-    "food_diet": ["whole_food", "claim_filter", "reality_check"],
     "cost_access": ["cost_access", "glp1_medication", "reality_check"],
     "comparison": ["comparison", "claim_filter", "reviews_results"],
     "public_figure": ["public_fact_check", "claim_filter", "reality_check"],
-    "benefits": ["claim_filter", "reality_check", "reviews_results"],
+    "benefits": ["claim_filter", "reviews_results", "reality_check"],
     "general_review": ["general_review", "claim_filter", "reality_check"],
 }
 
+PRIMARY_FAMILY_BONUS = {
+    "viral_recipe": 22, "tea_drink": 22, "smoothie_juice": 22, "high_protein": 22,
+    "herb_spice": 22, "whole_food": 22, "dosage": 20, "safety": 20,
+    "timing_guide": 24, "injection_site": 24, "glp1_medication": 18,
+}
+SECONDARY_FAMILY_PENALTY = {"reality_check": -14, "general_review": -10}
 BANNED_TITLE_PHRASES = [
-    "clinical evidence",
-    "evidence review",
-    "clinical realities",
-    "metabolic impacts",
-    "long-term expectations",
-    "what to expect",
-    "comprehensive",
-    "ultimate guide",
-    "complete guide",
-    "deep dive",
-    "everything you need to know",
+    "clinical evidence", "evidence review", "clinical realities", "metabolic impacts",
+    "long-term expectations", "what to expect", "comprehensive", "ultimate guide",
+    "complete guide", "deep dive", "everything you need to know",
 ]
-
 HOOK_TOKENS = [
     "works", "fails", "hype", "reality", "tested", "tracked", "results", "risks",
     "side effects", "timeline", "tradeoff", "what to track", "what to avoid",
     "what users", "what changed", "what happens", "what actually", "red flags",
-    "dose", "coverage", "cost", "claims", "signal", "mistake", "catch",
+    "dose", "coverage", "cost", "claims", "signal", "mistake", "catch", "timing",
+    "injection", "site", "fullness", "satiety", "protein", "fiber",
 ]
