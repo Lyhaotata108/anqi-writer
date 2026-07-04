@@ -57,13 +57,6 @@ def rotation_index(keyword: str, family: str, size: int) -> int:
     return int(digest[:8], 16) % size
 
 
-def rotate(items: list[str], keyword: str, family: str) -> list[str]:
-    if not items:
-        return []
-    idx = rotation_index(keyword, family, len(items))
-    return items[idx:] + items[:idx]
-
-
 def title_context(keyword: str, year: int) -> dict[str, str | int]:
     subject = canonicalize_title_subject(keyword)
     question = canonicalize_title_question(keyword)
@@ -85,15 +78,22 @@ def candidate_families(intent: TitleIntent) -> list[str]:
     return merged
 
 
+def iter_rotated_patterns(keyword: str, family: str) -> list[tuple[int, str]]:
+    patterns = TITLE_PATTERNS.get(family, [])
+    if not patterns:
+        return []
+    start = rotation_index(keyword, family, len(patterns))
+    return [((start + offset) % len(patterns), patterns[(start + offset) % len(patterns)]) for offset in range(len(patterns))]
+
+
 def generate_title_candidates(keyword: str, article_type: str = "", classification: dict[str, Any] | None = None, year: int | None = None, existing_titles: list[str] | None = None, existing_patterns: set[str] | None = None) -> list[TitleCandidate]:
     year = year or datetime.now().year
     intent = classify_title_intent(keyword, article_type, classification)
     ctx = title_context(keyword, year)
     candidates: list[TitleCandidate] = []
     for family in candidate_families(intent):
-        patterns = rotate(TITLE_PATTERNS.get(family, []), keyword, family)
-        for i, pattern in enumerate(patterns):
-            pattern_id = f"{family}_{i + 1:02d}"
+        for original_index, pattern in iter_rotated_patterns(keyword, family):
+            pattern_id = f"{family}_{original_index + 1:02d}"
             title = trim_title(pattern.format(**ctx))
             candidates.append(score_title(title, str(ctx["kw"]), family, pattern_id, existing_titles, existing_patterns))
     return candidates
