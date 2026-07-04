@@ -3,9 +3,9 @@
 """Batch-safe schema writer for AnQiCMS markdown output.
 
 The AI returns compact JSON content blocks. This module owns final Markdown
-assembly, media placeholders, references, and validation. If the model returns
-bad JSON, a safe structured fallback is generated so the batch still produces a
-reviewable article instead of an empty result.
+assembly, media placeholders, references, validation, and title normalization.
+If the model returns bad JSON, a safe structured fallback is generated so the
+batch still produces a reviewable article instead of an empty result.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from keyword_cleaner import clean_keyword
 from pipeline_controller import PipelineController, PipelineResult
 from preview_renderer import render_preview_html
 from publish_articles import load_article
+from title_engine import generate_seo_title, title_case_keyword
 
 
 FORBIDDEN_STYLE_PHRASES = [
@@ -74,15 +75,6 @@ def compact(text: Any, max_len: int | None = None) -> str:
     value = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1", value)
     value = re.sub(r"https?://\S+", "", value).strip()
     return value[:max_len].rstrip(" ,;:-") if max_len else value
-
-
-def title_case_keyword(keyword: str) -> str:
-    minor = {"a", "an", "and", "as", "at", "by", "for", "in", "is", "of", "on", "or", "the", "to", "vs", "with"}
-    out: list[str] = []
-    for i, word in enumerate(re.sub(r"[^a-zA-Z0-9]+", " ", keyword).split()):
-        lower = word.lower()
-        out.append(lower if i and lower in minor else lower[:1].upper() + lower[1:])
-    return " ".join(out) or "Article"
 
 
 def strip_code_fences(text: str) -> str:
@@ -215,14 +207,13 @@ def normalize_items(raw: Any, article_type: str) -> list[dict[str, str]]:
     return items
 
 
-def normalize_article_json(data: dict[str, Any], keyword: str, category_id: int, article_type: str) -> dict[str, Any]:
-    title = compact(data.get("title"), 95) or title_case_keyword(keyword)
-    for phrase in FORBIDDEN_STYLE_PHRASES:
-        title = re.sub(re.escape(phrase), "", title, flags=re.I).strip(" -:—")
+def normalize_article_json(data: dict[str, Any], keyword: str, category_id: int, article_type: str, classification: dict[str, Any]) -> dict[str, Any]:
+    ai_title = compact(data.get("title"), 95)
+    title = generate_seo_title(keyword, article_type, classification, original_title=ai_title)
     description = compact(data.get("description"), 155) or f"A practical, evidence-aware guide to {keyword}, including what matters, what falls short, and what to do next."
     sections = [normalize_section(x) for x in list_from(data.get("sections"), 4, "sections")[:7]]
     return {
-        "title": title or title_case_keyword(keyword),
+        "title": title,
         "description": description,
         "keywords": list(dict.fromkeys([keyword, article_type.replace("_", " "), "evidence aware guide"] + [compact(x, 50) for x in data.get("keywords", [])[:6] if compact(x)])) if isinstance(data.get("keywords", []), list) else [keyword, article_type.replace("_", " "), "evidence aware guide"],
         "category_id": category_id,
@@ -238,17 +229,7 @@ def normalize_article_json(data: dict[str, Any], keyword: str, category_id: int,
 
 
 def fallback_article_json(keyword: str, category_id: int, article_type: str, classification: dict[str, Any]) -> dict[str, Any]:
-    topic = title_case_keyword(keyword)
-    title_prefix = {
-        "top_10_listicle": f"Best Options for {topic}: What to Compare Before You Choose",
-        "comparison_decision": f"{topic}: How to Compare the Real Tradeoffs",
-        "side_effect_safety": f"{topic}: Safety Questions, Red Flags, and Next Steps",
-        "dosage_guide": f"{topic}: Practical Amounts, Safety Boundaries, and Mistakes to Avoid",
-        "timing_guide": f"{topic}: Best Timing, Realistic Timelines, and Common Mistakes",
-        "symptom_explainer": f"{topic}: What It Can Mean and What to Track",
-        "cost_review": f"{topic}: Cost, Value, and When It May Be Worth It",
-        "process_explainer": f"{topic}: What Actually Happens Step by Step",
-    }.get(article_type, f"{topic}: What Matters, What Does Not, and What To Do Next")
+    title = generate_seo_title(keyword, article_type, classification)
     opening = [
         f"People searching for {keyword} usually want a clear answer, but the results often mix marketing claims, personal stories, and medical-sounding advice without explaining what should actually guide a decision.",
         "This guide uses a practical editorial framework: what the question really means, what evidence-aware readers should compare, what can go wrong, and what to track before taking action.",
@@ -280,7 +261,7 @@ def fallback_article_json(keyword: str, category_id: int, article_type: str, cla
         {"question": "When should I ask a professional", "answer": "Ask a qualified professional if you have a medical condition, take medication, are pregnant or breastfeeding, have abnormal symptoms, or plan to make a major diet, supplement, or medication change."},
     ]
     return {
-        "title": title_prefix,
+        "title": title,
         "description": f"A practical, evidence-aware guide to {keyword}, including what to compare, what to avoid, and what to do next."[:155],
         "keywords": [keyword, article_type.replace("_", " "), "evidence aware guide"],
         "category_id": category_id,
@@ -354,7 +335,6 @@ def youtube_query(keyword: str, article_type: str) -> str:
 
 
 def sanitize_final_markdown(markdown: str) -> str:
-    # Preserve only line-level frontmatter delimiters; remove body separators and leaked metadata.
     lines = markdown.splitlines()
     if lines and lines[0].strip() == "---":
         try:
@@ -474,8 +454,10 @@ def build_writer_prompt(keyword: str, category_id: int, article_type: str, route
     secondary_keywords = secondary_keywords or []
     retry_notes = retry_notes or []
     item_rule = "items must contain exactly 10 objects" if article_type == "top_10_listicle" else "items must be []"
+    seo_title_hint = generate_seo_title(keyword, article_type, classification)
     return f"""Return ONLY valid compact JSON. No Markdown. No code fences. No URLs. No frontmatter.
 Keyword: {keyword}
+SEO title style target: {seo_title_hint}
 Category: {category_id}
 Article type: {article_type}
 Classification: {classification}
@@ -484,6 +466,7 @@ Secondary keywords: {secondary_keywords[:12]}
 Retry notes: {retry_notes[:5]}
 Rules:
 - Keep it compact enough that the JSON completes.
+- title may be short; final title is controlled by the SEO title engine.
 - opening: exactly 2 paragraphs, 45-80 words each.
 - sections: exactly 5 objects. Each section has heading, paragraphs array with 1-2 paragraphs, optional bullets array.
 - table: 3-4 columns and exactly 4 rows.
@@ -527,7 +510,7 @@ def generate_sample_style_article(keyword: str, workspace_root: Path, output_roo
         try:
             prompt = build_writer_prompt(clean_keyword_value, category_id, article_type, route, classification, secondary_keywords, retry_notes)
             raw_json = generate_article_json(controller, prompt)
-            article_data = normalize_article_json(raw_json, clean_keyword_value, category_id, article_type)
+            article_data = normalize_article_json(raw_json, clean_keyword_value, category_id, article_type, classification)
             markdown = assemble_markdown(article_data, clean_keyword_value, category_id, classification)
             ok, issues = validate_final_markdown(markdown, article_type)
             if ok:
