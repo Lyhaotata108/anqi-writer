@@ -105,29 +105,54 @@ Purpose:
 Run one file:
 
 ```bash
-python3 scripts/quality_guard.py output/ui_berberine-weight-loss.md
+python3 scripts/quality_guard.py ui_berberine-weight-loss.md
 ```
 
 Run a directory:
 
 ```bash
-python3 scripts/quality_guard.py output --corpus output
+python3 scripts/quality_guard.py . --corpus .
 ```
 
-## Current integration status
+## Browser UI integration
 
-The modules are foundation-ready but not fully wired into the browser UI generation flow yet.
+File:
 
-Current safe workflow:
+```text
+scripts/browser_ui.py
+```
 
-1. Run clustering.
-2. Review `.clusters.csv`.
-3. Generate from `.to_generate.txt`.
-4. Run quality guard on generated Markdown.
-5. Review failures before scaling.
+Current behavior:
 
-Next integration step:
+1. Before generating each keyword, the browser UI builds a deterministic variation brief.
+2. It saves the brief files under:
 
-- Feed `variation_engine.py` prompt briefs into the article-generation controller.
-- Use `quality_guard.py` after each generated article.
-- Auto-rewrite or block articles that fail the guard.
+```text
+output/briefs/ui_<keyword>.brief.json
+output/briefs/ui_<keyword>.brief.txt
+```
+
+3. It logs the lane, entity, intent, scene, and brief filename.
+4. After generation, it runs `quality_guard.py` logic automatically.
+5. Each result includes `quality_score`, `quality_passed`, `quality_issues`, `quality_warnings`, and the brief paths.
+6. The UI summary shows quality score and PASS/REVIEW status per article.
+
+## Recommended safe workflow
+
+1. Put one category CSV per file under `data/`.
+2. Run clustering.
+3. Review `.clusters.csv`.
+4. Paste `.to_generate.txt` keywords into the browser UI.
+5. Generate a 100-keyword test batch.
+6. Review quality scores and failed issues.
+7. Expand to 500, then 2000+ only after the failure pattern is understood.
+
+## Still pending
+
+The browser UI now creates and stores variation briefs and runs quality guard, but the article writer still needs deeper integration so the generated article body fully follows each variation brief.
+
+Next steps:
+
+- Inject the variation brief directly into the article body builder.
+- Use quality guard failures to trigger automatic rewrite/repair.
+- Feed secondary keywords from clustering into each article brief.
