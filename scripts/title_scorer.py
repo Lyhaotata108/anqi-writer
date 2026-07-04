@@ -24,6 +24,22 @@ def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", str(text or "").lower()).strip()
 
 
+def title_frame_key(title: str) -> str:
+    raw = str(title or "").strip()
+    if "?" in raw:
+        frame = raw.split("?", 1)[1]
+    elif ":" in raw:
+        frame = raw.split(":", 1)[1]
+    elif "—" in raw:
+        frame = raw.split("—", 1)[1]
+    else:
+        frame = raw
+    frame = frame.replace("’", "'").replace("‘", "'")
+    frame = re.sub(r"\b20\d{2}\b", "year", frame.lower())
+    frame = re.sub(r"[^a-z0-9]+", "-", frame).strip("-")
+    return frame or "whole-title"
+
+
 def word_ngrams(text: str, n: int = 4) -> set[tuple[str, ...]]:
     words = re.findall(r"[a-z0-9]+", normalize(text))
     if len(words) < n:
@@ -42,6 +58,11 @@ def max_title_similarity(title: str, existing_titles: Iterable[str]) -> float:
     return max((jaccard(grams, word_ngrams(other)) for other in existing_titles), default=0.0)
 
 
+def frame_repeat_count(title: str, existing_titles: Iterable[str]) -> int:
+    frame = title_frame_key(title)
+    return sum(1 for old in existing_titles if title_frame_key(old) == frame)
+
+
 def score_title(title: str, keyword: str, family: str, pattern_id: str, existing_titles: list[str] | None = None, existing_patterns: set[str] | None = None) -> TitleCandidate:
     existing_titles = existing_titles or []
     existing_patterns = existing_patterns or set()
@@ -50,10 +71,10 @@ def score_title(title: str, keyword: str, family: str, pattern_id: str, existing
     score = 0
     reasons: list[str] = []
 
-    if title_l.startswith(kw_l[: min(22, len(kw_l))]) or kw_l.split()[0] in title_l[:35]:
+    if title_l.startswith(kw_l[: min(22, len(kw_l))]) or (kw_l.split() and kw_l.split()[0] in title_l[:35]):
         score += 20
         reasons.append("keyword/front-loaded")
-    if 48 <= len(title) <= 108:
+    if 48 <= len(title) <= 112:
         score += 12
         reasons.append("good-length")
     if any(token in title_l for token in HOOK_TOKENS):
@@ -62,9 +83,19 @@ def score_title(title: str, keyword: str, family: str, pattern_id: str, existing
     if ":" in title or "?" in title or "—" in title:
         score += 8
         reasons.append("clickable-structure")
+
     if pattern_id not in existing_patterns:
-        score += 12
+        score += 16
         reasons.append("fresh-pattern")
+    else:
+        score -= 34
+        reasons.append("used-pattern-penalty")
+
+    repeated_frame_count = frame_repeat_count(title, existing_titles)
+    if repeated_frame_count:
+        penalty = min(54, repeated_frame_count * 9)
+        score -= penalty
+        reasons.append(f"repeated-frame-penalty:{repeated_frame_count}")
 
     for phrase in BANNED_TITLE_PHRASES:
         if phrase in title_l:
@@ -73,13 +104,13 @@ def score_title(title: str, keyword: str, family: str, pattern_id: str, existing
 
     similarity = max_title_similarity(title, existing_titles)
     if similarity > 0.55:
-        score -= 50
+        score -= 60
         reasons.append(f"too-similar:{similarity:.2f}")
     elif similarity > 0.35:
-        score -= 20
+        score -= 25
         reasons.append(f"similar:{similarity:.2f}")
     else:
-        score += 8
+        score += 10
         reasons.append("batch-distinct")
 
     return TitleCandidate(title=title, family=family, pattern_id=pattern_id, score=score, reasons=reasons)
