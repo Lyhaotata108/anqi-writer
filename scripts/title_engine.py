@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 """Intent-family SEO title engine.
 
-The engine is designed for large keyword pools: classify title intent, generate
-multiple candidates from pattern families, score candidates, and pick a varied
-non-generic headline. It intentionally avoids one-off keyword exceptions.
+Designed for large keyword pools: clean the raw keyword into a title subject,
+classify title intent, generate multiple candidates from pattern families, score
+candidates, and pick a varied non-generic headline.
 """
 
 from __future__ import annotations
@@ -16,28 +16,10 @@ import hashlib
 import re
 from typing import Any
 
+from canonical_subject import canonicalize_title_question, canonicalize_title_subject, title_case
 from title_intent_classifier import TitleIntent, classify_title_intent
 from title_pattern_bank import FAMILY_PRIORITY, TITLE_PATTERNS
 from title_scorer import TitleCandidate, score_title, select_best
-
-
-SMALL_WORDS = {"a", "an", "and", "as", "at", "by", "for", "in", "is", "of", "on", "or", "the", "to", "vs", "with"}
-BRAND_MAP = {
-    "bluechew": "BlueChew",
-    "extenze": "ExtenZe",
-    "ozempic": "Ozempic",
-    "wegovy": "Wegovy",
-    "mounjaro": "Mounjaro",
-    "zepbound": "Zepbound",
-    "enzyte": "Enzyte",
-    "cbd": "CBD",
-    "ed": "ED",
-    "glp": "GLP",
-    "fda": "FDA",
-    "a1c": "A1C",
-    "ldl": "LDL",
-    "hdl": "HDL",
-}
 
 
 @dataclass(frozen=True)
@@ -47,6 +29,8 @@ class TitleDecision:
     reason: str
     family: str = ""
     intent_family: str = ""
+    subject: str = ""
+    question: str = ""
     score: int = 0
 
 
@@ -55,20 +39,11 @@ def normalize(text: str) -> str:
 
 
 def title_case_keyword(keyword: str) -> str:
-    words = re.sub(r"[^a-zA-Z0-9+%]+", " ", str(keyword or "")).split()
-    out: list[str] = []
-    for i, word in enumerate(words):
-        lower = word.lower()
-        if lower in BRAND_MAP:
-            out.append(BRAND_MAP[lower])
-        elif i and lower in SMALL_WORDS:
-            out.append(lower)
-        else:
-            out.append(lower[:1].upper() + lower[1:])
-    return " ".join(out) or "Article"
+    # Backward-compatible public helper used by other writer modules.
+    return title_case(keyword)
 
 
-def trim_title(title: str, max_len: int = 108) -> str:
+def trim_title(title: str, max_len: int = 112) -> str:
     title = normalize(title).rstrip(" .")
     if len(title) <= max_len:
         return title
@@ -90,11 +65,15 @@ def rotate(items: list[str], keyword: str, family: str) -> list[str]:
 
 
 def title_context(keyword: str, year: int) -> dict[str, str | int]:
-    kw = title_case_keyword(keyword)
-    entity = kw
-    if re.match(r"^(Do|Does|Can|Will|Is|Are|Should)\b", kw):
-        entity = re.sub(r"^(Do|Does|Can|Will|Is|Are|Should)\s+", "", kw).rstrip("?")
-    return {"kw": kw, "entity": entity, "year": year}
+    subject = canonicalize_title_subject(keyword)
+    question = canonicalize_title_question(keyword)
+    return {
+        "kw": subject,
+        "subject": subject,
+        "question": question.rstrip("?"),
+        "raw_kw": title_case(keyword),
+        "year": year,
+    }
 
 
 def candidate_families(intent: TitleIntent) -> list[str]:
@@ -116,12 +95,14 @@ def generate_title_candidates(keyword: str, article_type: str = "", classificati
         for i, pattern in enumerate(patterns):
             pattern_id = f"{family}_{i + 1:02d}"
             title = trim_title(pattern.format(**ctx))
-            candidates.append(score_title(title, keyword, family, pattern_id, existing_titles, existing_patterns))
+            candidates.append(score_title(title, str(ctx["kw"]), family, pattern_id, existing_titles, existing_patterns))
     return candidates
 
 
 def choose_title_pattern(keyword: str, article_type: str, classification: dict | None = None, year: int | None = None, existing_titles: list[str] | None = None, existing_patterns: set[str] | None = None) -> TitleDecision:
+    year = year or datetime.now().year
     intent = classify_title_intent(keyword, article_type, classification)
+    ctx = title_context(keyword, year)
     best = select_best(generate_title_candidates(keyword, article_type, classification, year, existing_titles, existing_patterns))
     return TitleDecision(
         title=best.title,
@@ -129,6 +110,8 @@ def choose_title_pattern(keyword: str, article_type: str, classification: dict |
         reason="; ".join(best.reasons),
         family=best.family,
         intent_family=intent.intent_family,
+        subject=str(ctx["kw"]),
+        question=str(ctx["question"]),
         score=best.score,
     )
 
