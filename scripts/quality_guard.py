@@ -52,12 +52,16 @@ ACTION_GUIDE_PATTERNS = [
     r"##\s+Daily Protocol",
 ]
 
+# These are hard-risk wording patterns. They intentionally avoid benign FAQ
+# questions such as "Can I stop taking Ozempic...?" and instead target advice
+# that appears to tell the reader to make medication changes without care.
 YMYL_RISK_PATTERNS = [
     r"\bguaranteed\b",
     r"\bcure\b",
     r"\bwill cure\b",
     r"\bmust take\b",
-    r"\bstop taking\b",
+    r"\b(you should|you can|patients should|people should|it is safe to)\s+stop taking\b",
+    r"\bstop taking\s+(?:your\s+)?(?:prescribed|prescription|medication|medicine|drug)\b",
     r"\breplaces medication\b",
     r"\bno risk\b",
     r"\bclinically proven to melt\b",
