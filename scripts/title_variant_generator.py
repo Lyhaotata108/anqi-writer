@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Composable CTR title variant generator for Title Engine V3.5.
+"""Composable CTR title variant generator for Title Engine V3.6.
 
-V3.5 keeps non-colon variety but filters awkward fragment joins such as repeated
-"before" clauses, double-dash titles, and unnatural "X in Subject" shapes.
+V3.6 keeps non-colon variety but rejects overlong generated titles instead of
+letting the title engine truncate them mid-phrase.
 """
 
 from __future__ import annotations
@@ -12,20 +12,21 @@ import re
 
 from ctr_fragment_bank import ANGLE_GRAMMAR
 
+MAX_GENERATED_TITLE_LEN = 108
 
 EXTRA_SHAPES_BY_ANGLE = {
-    "timeline": ["subject_dash", "question_dash", "question_direct"],
-    "before_buy": ["subject_dash", "question_dash", "colon_dash"],
+    "timeline": ["subject_dash", "colon_dash"],
+    "before_buy": ["subject_dash", "colon_dash", "before_subject"],
     "hidden_catch": ["subject_dash", "question_dash", "before_subject"],
     "reality_check_ctr": ["question_direct", "question_dash", "subject_dash"],
-    "looked_into": ["editorial_dash", "subject_dash", "question_dash"],
-    "hidden_risk": ["subject_dash", "question_dash", "question_direct"],
-    "money_access": ["subject_dash", "question_dash", "colon_dash"],
-    "comparison_decision": ["subject_dash", "question_dash", "question_direct"],
-    "public_claim": ["subject_dash", "question_dash"],
-    "before_next_dose": ["subject_dash", "question_dash", "before_subject"],
-    "practical_filter": ["subject_dash", "question_dash", "before_subject"],
-    "hidden_context": ["subject_dash", "question_dash", "question_direct"],
+    "looked_into": ["editorial_dash", "subject_dash", "colon_dash"],
+    "hidden_risk": ["subject_dash", "question_dash", "colon_dash"],
+    "money_access": ["subject_dash", "colon_dash"],
+    "comparison_decision": ["subject_dash", "question_dash", "colon_dash"],
+    "public_claim": ["subject_dash", "question_dash", "colon_dash"],
+    "before_next_dose": ["subject_dash", "colon_dash"],
+    "practical_filter": ["subject_dash", "colon_dash", "before_subject"],
+    "hidden_context": ["subject_dash", "question_dash", "colon_dash"],
 }
 
 
@@ -68,13 +69,9 @@ def strip_leading_connector(text: str) -> str:
     return text
 
 
-def demote_before(text: str) -> str:
-    """Remove a leading transition when another before-clause already exists."""
+def demote_transition(text: str) -> str:
     text = strip_leading_connector(text)
-    text = re.sub(r"^before\s+", "", text, flags=re.I)
-    text = re.sub(r"^when\s+", "", text, flags=re.I)
-    text = re.sub(r"^once\s+", "", text, flags=re.I)
-    text = re.sub(r"^after\s+", "", text, flags=re.I)
+    text = re.sub(r"^(before|when|once|after)\s+", "", text, flags=re.I)
     return normalize(text)
 
 
@@ -83,7 +80,7 @@ def phrase_sentence(lead: str, contrast: str) -> str:
     contrast = normalize(contrast)
     c_low = contrast.lower()
     if " before " in lead.lower() and c_low.startswith("before "):
-        return f"{lead} — {cap_first(demote_before(contrast))}"
+        return f"{lead} — {cap_first(demote_transition(contrast))}"
     if c_low.startswith("and "):
         return f"{lead} {contrast}"
     return f"{lead} {contrast}"
@@ -139,7 +136,21 @@ def build_title(subject: str, question: str, lead: str, contrast: str, shape: st
     return f"{subject}: {phrase_dash(lead, contrast)}"
 
 
-def has_repeated_transition(title: str) -> bool:
+def commercial_or_operational_subject(subject: str, keyword: str, angle: str) -> bool:
+    s = normalize(subject).lower()
+    k = normalize(keyword).lower()
+    if angle in {"before_buy", "money_access", "before_next_dose"}:
+        return True
+    if s.startswith("best ") or k.startswith("best "):
+        return True
+    if any(token in s for token in ["dosage", "dose", "injection site", "over the counter", "non prescribed"]):
+        return True
+    if k.startswith("how to ask your doctor"):
+        return True
+    return False
+
+
+def has_bad_transition(title: str) -> bool:
     t = normalize(title).lower()
     if t.count(" before ") >= 2:
         return True
@@ -149,17 +160,36 @@ def has_repeated_transition(title: str) -> bool:
         return True
     if re.search(r"\bthat\s+[—:]", t):
         return True
+    if re.search(r"\b(before|when|once|after) the$", t):
+        return True
+    if re.search(r"\b(gets|looks|make the|does not)$", t):
+        return True
+    if re.search(r"\b(the|and|or|to|for|with|of|in)$", t):
+        return True
     return False
 
 
-def shape_allowed(shape: str, lead: str, contrast: str, angle: str) -> bool:
+def shape_allowed(shape: str, lead: str, contrast: str, angle: str, subject: str, keyword: str) -> bool:
     lead_l = lead.lower()
     contrast_l = contrast.lower()
+    if shape.startswith("question") and commercial_or_operational_subject(subject, keyword, angle):
+        return False
     if shape == "before_subject" and ("before" in lead_l or contrast_l.startswith("before ")):
         return False
     if shape == "question_direct" and contrast_l.startswith("before ") and "before" in lead_l:
         return False
     if shape == "editorial_dash" and not re.match(r"^(i looked|i checked|i compared)\b", lead_l):
+        return False
+    return True
+
+
+def generated_title_ok(title: str) -> bool:
+    title = normalize(title)
+    if len(title) > MAX_GENERATED_TITLE_LEN:
+        return False
+    if len(title) < 48:
+        return False
+    if has_bad_transition(title):
         return False
     return True
 
@@ -184,10 +214,10 @@ def generate_fragment_variants(keyword: str, ctr_angle: str, ctx: dict, limit: i
             for shape in shapes:
                 if len(out) >= limit:
                     return out
-                if not shape_allowed(shape, lead, contrast, ctr_angle):
+                if not shape_allowed(shape, lead, contrast, ctr_angle, subject, keyword):
                     continue
                 title = build_title(subject, question, lead, contrast, shape)
-                if has_repeated_transition(title):
+                if not generated_title_ok(title):
                     continue
                 key = normalize(title).lower()
                 if key in seen:
