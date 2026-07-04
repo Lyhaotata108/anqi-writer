@@ -43,6 +43,8 @@ def main() -> int:
         used_patterns.add(meta["pattern"])
         rows.append({
             "keyword": keyword,
+            "canonical_subject": meta.get("subject"),
+            "canonical_question": meta.get("question"),
             "intent_family": intent.intent_family,
             "entity_type": intent.entity_type,
             "modifier": intent.modifier,
@@ -56,7 +58,7 @@ def main() -> int:
 
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
-    fields = ["keyword", "intent_family", "entity_type", "modifier", "page_type", "title_family", "pattern_id", "title_score", "title", "reason"]
+    fields = ["keyword", "canonical_subject", "canonical_question", "intent_family", "entity_type", "modifier", "page_type", "title_family", "pattern_id", "title_score", "title", "reason"]
     with out.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
