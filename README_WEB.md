@@ -15,7 +15,7 @@ blood
 3. 一键运行关键词聚类
 4. 一键生成主文章标题
 5. 一键生成正文蓝图
-6. 一键生成完整 Markdown 正文
+6. 一键生成完整 Markdown 正文：可选模板生成或 AI 生成
 7. 页面预览结果和下载 CSV / Markdown
 
 ## 本地启动
@@ -57,6 +57,50 @@ Blood
 - TXT：一行一个关键词
 - CSV：支持 `keyword` 或 `primary_keyword` 字段
 
+## AI 正文生成
+
+左侧勾选：
+
+```text
+使用 AI 生成爆款正文
+```
+
+然后填写：
+
+```text
+API Key
+API Base URL
+Model
+Temperature
+每个分类最多生成几篇
+```
+
+默认使用 OpenAI-compatible `/v1/chat/completions` 接口，所以也可以接兼容 OpenAI 协议的代理或第三方模型服务。
+
+建议批量生成时先这样测试：
+
+```text
+每个分类最多生成几篇 = 3 或 5
+```
+
+确认文章风格、长度、FAQ、表格都没问题后，再改成：
+
+```text
+每个分类最多生成几篇 = 0
+```
+
+`0` 表示全量生成。
+
+## 批量生成策略
+
+系统不是一次把所有文章塞给 AI，而是：
+
+```text
+一篇文章 = 一次 API 请求
+```
+
+每篇生成完会立刻写入 Markdown 文件和发布队列。这样即使中途断开，也可以继续跑；已存在的 Markdown 默认会跳过，除非勾选“覆盖已存在 Markdown”。
+
 ## 输出文件
 
 每次运行会生成一个独立目录：
@@ -92,6 +136,7 @@ articles/
 - 多分类同时运行：Weight Loss / CBD / Blood
 - 每个分类单独上传关键词
 - 每个分类单独生成聚类、标题、正文蓝图、完整 Markdown 正文
+- 支持 AI 正文生成，也保留模板正文生成作为备用
 - 多分类运行汇总表
 - 查看关键词聚类结果
 - 查看主文章队列
@@ -117,29 +162,19 @@ articles/
 
 ## 命令行备用方式
 
-Weight Loss：
+模板正文：
 
 ```bash
-python3 scripts/keyword_cluster_engine.py data/title_intent_seed_keywords.txt --category weight_loss --audit-output output/keyword_cluster_audit_v1.csv --queue-output output/primary_article_queue_v1.csv
-python3 scripts/title_intent_audit.py output/primary_article_queue_v1.csv --category weight_loss --output output/title_intent_audit_v38.csv
-python3 scripts/body_blueprint_engine.py output/title_intent_audit_v38.csv --output output/body_blueprint_audit_v2.csv
 python3 scripts/body_writer_engine.py output/body_blueprint_audit_v2.csv --articles-dir output/articles/weight_loss --queue-output output/article_publish_queue_weight_loss.csv
 ```
 
-CBD：
+AI 正文：
 
 ```bash
-python3 scripts/keyword_cluster_engine.py data/cbd_keywords.txt --category cbd --audit-output output/cbd_cluster_audit.csv --queue-output output/cbd_primary_queue.csv
-python3 scripts/title_intent_audit.py output/cbd_primary_queue.csv --category cbd --output output/cbd_title_audit.csv
-python3 scripts/body_blueprint_engine.py output/cbd_title_audit.csv --output output/cbd_body_blueprint.csv
-python3 scripts/body_writer_engine.py output/cbd_body_blueprint.csv --articles-dir output/articles/cbd --queue-output output/article_publish_queue_cbd.csv
+export OPENAI_API_KEY="你的 API Key"
+export OPENAI_BASE_URL="https://api.openai.com/v1"
+export OPENAI_MODEL="gpt-4o-mini"
+python3 scripts/ai_body_writer_engine.py output/body_blueprint_audit_v2.csv --articles-dir output/ai_articles/weight_loss --queue-output output/ai_article_publish_queue_weight_loss.csv --max-articles 3
 ```
 
-Blood：
-
-```bash
-python3 scripts/keyword_cluster_engine.py data/blood_keywords.txt --category blood --audit-output output/blood_cluster_audit.csv --queue-output output/blood_primary_queue.csv
-python3 scripts/title_intent_audit.py output/blood_primary_queue.csv --category blood --output output/blood_title_audit.csv
-python3 scripts/body_blueprint_engine.py output/blood_title_audit.csv --output output/blood_body_blueprint.csv
-python3 scripts/body_writer_engine.py output/blood_body_blueprint.csv --articles-dir output/articles/blood --queue-output output/article_publish_queue_blood.csv
-```
+全量 AI 生成时把 `--max-articles 3` 改成 `--max-articles 0` 或直接删掉这个参数。
