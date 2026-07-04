@@ -2,9 +2,11 @@
 # -*- coding: utf-8 -*-
 """Reusable SEO title engine for batch article generation.
 
-The goal is controlled formula variation, not one-off keyword fixes:
-keyword-first, current-year freshness, risk/results/safety hooks, and no generic
-AI title phrases such as "Comprehensive Guide" or "Evidence-Based Review".
+Controlled formula variation:
+- keyword first
+- year freshness
+- tested/reviews/risk/safety hooks
+- no generic AI title phrases
 """
 
 from __future__ import annotations
@@ -44,14 +46,15 @@ def normalize(text: str) -> str:
 def title_case_keyword(keyword: str) -> str:
     words = re.sub(r"[^a-zA-Z0-9+%]+", " ", keyword).split()
     out: list[str] = []
+    brand_map = {"bluechew": "BlueChew", "extenze": "ExtenZe", "ozempic": "Ozempic", "wegovy": "Wegovy", "mounjaro": "Mounjaro", "enzyte": "Enzyte"}
     for i, word in enumerate(words):
         lower = word.lower()
         if i and lower in SMALL_WORDS:
             out.append(lower)
-        elif lower in {"cbd", "a1c", "ldl", "hdl", "ed"}:
+        elif lower in {"cbd", "a1c", "ldl", "hdl", "ed", "fda"}:
             out.append(lower.upper())
-        elif lower in {"ozempic", "wegovy", "mounjaro", "bluechew", "extenze", "enzyte"}:
-            out.append({"bluechew": "BlueChew", "extenze": "ExtenZe"}.get(lower, lower[:1].upper() + lower[1:]))
+        elif lower in brand_map:
+            out.append(brand_map[lower])
         else:
             out.append(lower[:1].upper() + lower[1:])
     return " ".join(out) or "Article"
@@ -65,7 +68,7 @@ def clean_title(title: str) -> str:
     return normalize(title)
 
 
-def trim_title(title: str, max_len: int = 76) -> str:
+def trim_title(title: str, max_len: int = 78) -> str:
     title = normalize(title).rstrip(" .")
     if len(title) <= max_len:
         return title
@@ -79,9 +82,11 @@ def is_public_figure(classification: dict | None, keyword: str) -> bool:
     entity = str(classification.get("entity") or "").strip()
     if page_type in {"viral_truth", "public_figure", "celebrity_profile"} and len(entity.split()) >= 2:
         return True
-    if re.search(r"\b(weight loss journey|transformation|before and after)\b", keyword, flags=re.I) and len(keyword.split()) >= 3:
-        return True
-    return False
+    return bool(re.search(r"\b(weight loss journey|transformation|before and after)\b", keyword, flags=re.I) and len(keyword.split()) >= 3)
+
+
+def starts_with_question(keyword: str) -> bool:
+    return bool(re.match(r"^(do|does|can|will|is|are|should|how|what|why|when)\b", keyword.strip(), flags=re.I))
 
 
 def choose_title_pattern(keyword: str, article_type: str, classification: dict | None = None, year: int | None = None) -> TitleDecision:
@@ -89,6 +94,20 @@ def choose_title_pattern(keyword: str, article_type: str, classification: dict |
     k = normalize(keyword).lower()
     kw = title_case_keyword(keyword)
     page_type = str((classification or {}).get("page_type") or "").lower()
+
+    # Public figure / viral profile should not look like a generic health guide.
+    if article_type == "public_figure_profile" or is_public_figure(classification, keyword):
+        return TitleDecision(trim_title(f"{kw}: Timeline, Results & What Is Actually Public"), "public_figure", "public figure / viral profile intent")
+
+    # Review/test/lab/result intent from the examples: "Tested", "Reviews", "Users Say".
+    if article_type == "review_analysis" or re.search(r"\b(reviews?|users?|reddit|trials?|tested|lab tests?|really work|actually work|real results)\b", k):
+        if starts_with_question(keyword):
+            return TitleDecision(trim_title(f"{kw}? {year} Reviews, Results & Safety Check"), "question_review", "question + review intent")
+        if "lab" in k or "tested" in k:
+            return TitleDecision(trim_title(f"{kw} {year}: What Tests Really Found"), "lab_test", "tested/lab-intent title")
+        if "review" in k or "reviews" in k or "users" in k:
+            return TitleDecision(trim_title(f"{kw}: What Users Say & Safety Notes ({year})"), "user_review", "review/user-report intent")
+        return TitleDecision(trim_title(f"{kw}: Real Results, Risks & {year} Safety"), "result_review", "results/review intent")
 
     if article_type == "top_10_listicle" or re.search(r"\b(top\s*\d+|best|ranked)\b", k):
         if kw.lower().startswith(("top ", "best ")):
@@ -115,14 +134,8 @@ def choose_title_pattern(keyword: str, article_type: str, classification: dict |
     if article_type == "cost_review":
         return TitleDecision(trim_title(f"{kw}: Cost, Coverage & Is It Worth It in {year}"), "cost", "cost/value intent")
 
-    if is_public_figure(classification, keyword):
-        return TitleDecision(trim_title(f"{kw}: Timeline, Results & What Is Actually Public"), "public_figure", "public figure / viral profile intent")
-
     if article_type == "process_explainer":
         return TitleDecision(trim_title(f"{kw}: What Happens, Costs & Safety Questions"), "process", "process/how-it-works intent")
-
-    if re.search(r"\b(reviews?|users?|reddit|trial|tested|lab test)\b", k):
-        return TitleDecision(trim_title(f"{kw}: Reviews, Real Results & Safety Notes"), "review_analysis", "review/tested intent")
 
     if article_type == "evidence_review":
         return TitleDecision(trim_title(f"{kw}: Real Results, Risks & {year} Safety"), "evidence_review", "evidence/review intent")
@@ -137,8 +150,9 @@ def generate_seo_title(keyword: str, article_type: str, classification: dict | N
     original = clean_title(original_title or "")
     if original:
         lower = original.lower()
+        current_year = str(year or datetime.now().year)
         banned = any(phrase in lower for phrase in BANNED_TITLE_PHRASES)
-        weak = not any(hook in lower for hook in ["risk", "safety", "result", "tested", "review", "works", "hidden", "timeline", "2026", str(year or datetime.now().year)])
+        weak = not any(hook in lower for hook in ["risk", "safety", "result", "tested", "review", "works", "hidden", "timeline", current_year])
         keyword_first = original.lower().startswith(title_case_keyword(keyword).lower().split(":")[0][:18].lower())
         if keyword_first and not banned and not weak:
             return trim_title(original)
