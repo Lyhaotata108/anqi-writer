@@ -1,11 +1,11 @@
 # Content pipeline foundation
 
-The main browser generation flow now uses a sample-style AI writer rather than the deterministic paragraph assembler.
+The pipeline is now oriented around batch-safe content production, not one-off keyword fixes.
 
-## Current production test flow
+## Current batch production flow
 
 ```text
-keywords
+clustered keywords
 ↓
 keyword cleanup
 ↓
@@ -13,16 +13,18 @@ intent classification
 ↓
 article type routing
 ↓
-sample-style AI writer
+AI returns strict JSON content blocks
 ↓
-local repair pass if the draft misses required structure
+program assembles import-safe Markdown
 ↓
 quality guard
 ↓
-preview
+batch report JSON/CSV
 ↓
-AnQiCMS import
+PASS-only AnQiCMS import
 ```
+
+The key rule is: AI writes content blocks; code owns structure, frontmatter, media placeholders, references, disclosure, author, and import gating.
 
 ## 1. Keyword clustering
 
@@ -57,7 +59,8 @@ scripts/keyword_cleaner.py
 Purpose:
 
 - Normalize keywords before generation.
-- Mark malformed, too-short, or numeric product-like keywords as `needs_review`, `brand_unknown`, `low_quality`, or `skip`.
+- Mark malformed, too-short, numeric product-like, or unsupported keywords as `needs_review`, `brand_unknown`, `low_quality`, or `skip`.
+- Prevent bad input from becoming bad batch output.
 
 Run:
 
@@ -92,14 +95,20 @@ File:
 scripts/article_type_router.py
 ```
 
-Routes keywords into:
+The router is reusable-pattern based. Do not add one-off keyword exceptions.
+
+Current article types:
 
 ```text
 top_10_listicle
-evidence_review
-process_explainer
 comparison_decision
 side_effect_safety
+dosage_guide
+timing_guide
+symptom_explainer
+cost_review
+process_explainer
+evidence_review
 generic_editorial
 ```
 
@@ -107,10 +116,16 @@ Run:
 
 ```bash
 python3 scripts/article_type_router.py "top 10 green tea for weight loss"
-python3 scripts/article_type_router.py "what does a dietitian do for weight loss"
+python3 scripts/article_type_router.py "berberine dosage for weight loss"
+python3 scripts/article_type_router.py "how long does a1c take to change"
 ```
 
-## 5. Sample-style AI writer
+Batch warning:
+
+- If `generic_editorial` becomes more than ~35% of a batch, add better router rules before scaling.
+- Generic output is allowed for edge cases, but a large generic share means the system is not understanding enough search intent.
+
+## 5. Schema-driven sample writer
 
 File:
 
@@ -120,11 +135,25 @@ scripts/sample_style_writer.py
 
 Purpose:
 
-- Generate a complete import-ready AnQiCMS Markdown article with frontmatter.
-- Follow the target sample style: strong search-confusion opening, evidence-aware framing, tables, FAQ, action protocol, references, and author block.
-- Avoid fake internal trials, fake clients, and fake clinical measurements.
-- Use real public-evidence language without inventing private data.
-- Include one `[IMAGE: ...]` and one `[YOUTUBE_VIDEO: ...]` placeholder.
+- Ask AI for strict JSON content blocks only.
+- Validate required fields: title, description, opening, sections, table, FAQ, next steps, and listicle items where required.
+- Assemble final Markdown in code.
+- Keep final Markdown import-safe.
+
+The program owns:
+
+```text
+frontmatter
+Last updated
+Disclaimer
+image query
+YouTube query
+FAQ placement
+Next Steps
+AI Disclosure
+References
+Author
+```
 
 Run:
 
@@ -133,45 +162,17 @@ python3 scripts/sample_style_writer.py "metabolism boosters for women over 40" -
 python3 scripts/sample_style_writer.py "top 10 green tea for weight loss" --category 1
 ```
 
-## 6. Article repair
+Final Markdown rules:
 
-File:
+- Exactly one frontmatter block.
+- No `title:`, `description:`, or `category_id:` leaked into body.
+- Exactly one `[IMAGE: query]`.
+- Exactly one `[YOUTUBE_VIDEO: query]`.
+- YouTube placeholder must be a query, not a URL.
+- No fake IDs like `sample123` or `dQw4w9WgXcQ`.
+- Exactly one FAQ, AI Disclosure, References, and Author section.
 
-```text
-scripts/article_repair.py
-```
-
-Purpose:
-
-- Repair one markdown file if the quality guard flags it.
-- Uses the configured Gemini-compatible endpoint.
-
-Run:
-
-```bash
-python3 scripts/article_repair.py ui_metabolism-boosters-for-women-over-40.md
-```
-
-## 7. YouTube helper
-
-File:
-
-```text
-scripts/youtube_finder.py
-```
-
-Purpose:
-
-- Test whether a keyword resolves to an embeddable YouTube video through the existing `media_enrichment.py` pipeline.
-- The article writer only inserts `[YOUTUBE_VIDEO: query]`; media enrichment resolves it during preview/import.
-
-Run:
-
-```bash
-python3 scripts/youtube_finder.py "resistance training women over 40 metabolism"
-```
-
-## 8. Quality guard
+## 6. Quality guard
 
 File:
 
@@ -181,17 +182,55 @@ scripts/quality_guard.py
 
 Purpose:
 
-- Score generated Markdown articles.
-- Check mobile paragraph length, generic phrases, missing FAQ, missing action guide, missing table, weak named-story signal, YMYL risk wording, and similarity to an optional corpus.
-- Similarity checks ignore draft files, brief files, and same-slug files to reduce false positives.
+- Enforce import-safe Markdown format.
+- Block leaked metadata, repeated sections, malformed YouTube placeholders, fake video IDs, template phrases, YMYL risk wording, missing FAQ/table/action guide, and high similarity.
 
 Run:
 
 ```bash
 python3 scripts/quality_guard.py ui_metabolism-boosters-for-women-over-40.md
+python3 scripts/quality_guard.py . --corpus .
 ```
 
-## Browser UI integration
+## 7. Batch reports
+
+Generated by:
+
+```text
+scripts/browser_ui.py
+```
+
+Output folder:
+
+```text
+output/batch_reports/
+```
+
+Each batch produces:
+
+```text
+batch_<job_id>.json
+batch_<job_id>.csv
+```
+
+Report fields include:
+
+```text
+keyword
+raw_keyword
+category_id
+article_type
+quality_score
+quality_passed
+quality_issues
+quality_warnings
+markdown_path
+preview_path
+```
+
+Use the CSV to review failed patterns before scaling.
+
+## 8. Browser UI integration
 
 File:
 
@@ -202,23 +241,33 @@ scripts/browser_ui.py
 Current behavior:
 
 1. Cleans each keyword.
-2. Classifies the keyword.
-3. Routes it to an article type.
-4. Calls `scripts/sample_style_writer.py` for complete Markdown generation.
-5. Runs quality guard automatically.
-6. Shows article type, quality score, preview link, and import button.
+2. Classifies each keyword.
+3. Routes it into a reusable article type.
+4. Calls the schema-driven sample writer.
+5. Runs quality guard.
+6. Writes batch JSON/CSV reports.
+7. Shows article type, quality score, preview link, and report paths.
+8. Imports only `quality_passed = true` articles.
+9. Skips REVIEW/FAIL articles during CMS import.
 
-## Recommended test workflow
+Start:
 
-1. Pull latest code.
-2. Start the browser UI.
-3. Test 5-10 keywords only.
-4. Review whether the output matches the two gold samples.
-5. Then test 20-50 keywords.
-6. Only after quality is stable, reconnect `.to_generate.txt` from clustering.
+```bash
+python3 scripts/browser_ui.py
+```
+
+## Recommended scale workflow
+
+1. Test 10 mixed keywords.
+2. Review format stability and report CSV.
+3. Test 50 keywords and check article type distribution.
+4. Test 200 keywords and check failure reasons.
+5. Test 500 keywords only after generic share and failure rate are acceptable.
+6. Import only PASS articles.
 
 ## Still pending
 
-- Secondary keyword injection from `.clusters.csv` into the sample writer prompt.
-- Stronger source/evidence retrieval before writing.
+- Secondary keyword injection from `.clusters.csv` into the schema prompt.
+- Source/evidence retrieval before writing.
 - Optional YouTube channel whitelist.
+- Duplicate-topic guard across current batch before generation.
