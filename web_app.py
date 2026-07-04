@@ -3,7 +3,7 @@
 """Web UI for the multi-category SEO pipeline.
 
 Run locally:
-    streamlit run web_app.py
+    python3 -m streamlit run web_app.py
 """
 
 from __future__ import annotations
@@ -132,10 +132,20 @@ def make_run_paths(run_name: str, category: str) -> dict[str, Path]:
         "primary_queue": run_dir / "primary_article_queue.csv",
         "title_audit": run_dir / "title_intent_audit.csv",
         "body_blueprint": run_dir / "body_blueprint_audit.csv",
+        "articles_dir": run_dir / "articles",
+        "publish_queue": run_dir / "article_publish_queue.csv",
     }
 
 
-def run_pipeline(keywords: list[str], run_name: str, category: str, run_cluster: bool, run_titles: bool, run_body: bool) -> tuple[dict[str, Path], list[tuple[str, bool, str]]]:
+def run_pipeline(
+    keywords: list[str],
+    run_name: str,
+    category: str,
+    run_cluster: bool,
+    run_titles: bool,
+    run_body: bool,
+    run_articles: bool,
+) -> tuple[dict[str, Path], list[tuple[str, bool, str]]]:
     paths = make_run_paths(run_name, category)
     paths["keyword_input"].write_text("\n".join(keywords) + "\n", encoding="utf-8")
     logs: list[tuple[str, bool, str]] = []
@@ -171,6 +181,19 @@ def run_pipeline(keywords: list[str], run_name: str, category: str, run_cluster:
             "--output", str(paths["body_blueprint"]),
         ])
         logs.append(("正文蓝图", ok, output))
+        if not ok:
+            return paths, logs
+
+    if run_articles:
+        if not paths["body_blueprint"].exists():
+            logs.append(("完整正文", False, "正文蓝图文件不存在，无法生成完整正文。"))
+            return paths, logs
+        ok, output = run_command([
+            sys.executable, "scripts/body_writer_engine.py", str(paths["body_blueprint"]),
+            "--articles-dir", str(paths["articles_dir"]),
+            "--queue-output", str(paths["publish_queue"]),
+        ])
+        logs.append(("完整正文", ok, output))
     return paths, logs
 
 
@@ -201,36 +224,46 @@ def category_metrics(paths: dict[str, Path]) -> dict[str, int | str]:
     queue_df = read_csv_df(paths["primary_queue"])
     title_df = read_csv_df(paths["title_audit"])
     body_df = read_csv_df(paths["body_blueprint"])
+    article_df = read_csv_df(paths["publish_queue"])
     raw_count = len(cluster_df) if not cluster_df.empty else 0
     primary_count = len(queue_df) if not queue_df.empty else (len(title_df) if not title_df.empty else 0)
     merge_count = max(0, raw_count - primary_count) if raw_count and primary_count else 0
+    article_count = len(article_df) if not article_df.empty else 0
     avg_words = "-"
-    if not body_df.empty and "target_word_count" in body_df.columns:
+    if not article_df.empty and "word_count" in article_df.columns:
+        avg_words = int(pd.to_numeric(article_df["word_count"], errors="coerce").fillna(0).mean())
+    elif not body_df.empty and "target_word_count" in body_df.columns:
         avg_words = int(pd.to_numeric(body_df["target_word_count"], errors="coerce").fillna(0).mean())
     return {
         "raw_keywords": raw_count,
         "primary_articles": primary_count,
         "merge_keywords": merge_count,
+        "article_count": article_count,
         "avg_words": avg_words,
     }
 
 
 def show_metrics(paths: dict[str, Path]) -> None:
     metrics = category_metrics(paths)
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("原始关键词", metrics["raw_keywords"] or "-")
     c2.metric("主文章数", metrics["primary_articles"] or "-")
     c3.metric("合并支持词", metrics["merge_keywords"] or "-")
-    c4.metric("正文平均目标字数", metrics["avg_words"])
+    c4.metric("Markdown正文", metrics["article_count"] or "-")
+    c5.metric("平均正文字数", metrics["avg_words"])
 
     title_df = read_csv_df(paths["title_audit"])
     body_df = read_csv_df(paths["body_blueprint"])
+    publish_df = read_csv_df(paths["publish_queue"])
     if not title_df.empty and "title_shape" in title_df.columns:
         st.markdown("**标题结构分布**")
         st.bar_chart(title_df["title_shape"].value_counts())
     if not body_df.empty and "body_template" in body_df.columns:
         st.markdown("**正文模板分布**")
         st.bar_chart(body_df["body_template"].value_counts())
+    if not publish_df.empty and "quality_status" in publish_df.columns:
+        st.markdown("**正文质量状态**")
+        st.bar_chart(publish_df["quality_status"].value_counts())
 
 
 def run_summary_table(paths_by_category: dict[str, dict[str, str]]) -> pd.DataFrame:
@@ -243,16 +276,36 @@ def run_summary_table(paths_by_category: dict[str, dict[str, str]]) -> pd.DataFr
             "raw_keywords": metrics["raw_keywords"],
             "primary_articles": metrics["primary_articles"],
             "merge_keywords": metrics["merge_keywords"],
-            "avg_target_words": metrics["avg_words"],
+            "markdown_articles": metrics["article_count"],
+            "avg_words": metrics["avg_words"],
             "run_dir": str(paths["run_dir"]),
         })
     return pd.DataFrame(rows)
 
 
+def show_article_preview(paths: dict[str, Path]) -> None:
+    publish_df = read_csv_df(paths["publish_queue"])
+    if publish_df.empty or "markdown_path" not in publish_df.columns:
+        st.info("暂时没有生成 Markdown 正文。")
+        return
+    st.subheader("完整正文发布队列")
+    cols = [c for c in ["keyword", "title", "word_count", "quality_status", "publish_ready", "markdown_path"] if c in publish_df.columns]
+    st.dataframe(publish_df[cols], use_container_width=True, height=300)
+    article_options = publish_df["markdown_path"].astype(str).tolist()
+    selected = st.selectbox("预览 Markdown 正文", article_options)
+    path = Path(selected)
+    if path.exists():
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        st.download_button("下载当前 Markdown", data=text.encode("utf-8"), file_name=path.name, mime="text/markdown", use_container_width=True)
+        st.markdown(text[:30000])
+    else:
+        st.warning("Markdown 文件不存在，可能已经被移动或删除。")
+
+
 ensure_dirs()
 
 st.title("Anqi Writer SEO Pipeline")
-st.caption("支持三个分类同时跑：Weight Loss、CBD、Blood。流程：关键词聚类 → 主文章标题 → 正文蓝图。")
+st.caption("支持三个分类同时跑：Weight Loss、CBD、Blood。流程：关键词聚类 → 主文章标题 → 正文蓝图 → 完整 Markdown 正文。")
 
 with st.sidebar:
     st.header("运行设置")
@@ -264,6 +317,7 @@ with st.sidebar:
     run_cluster = st.checkbox("1. 关键词聚类", value=True)
     run_titles = st.checkbox("2. 生成标题", value=True)
     run_body = st.checkbox("3. 生成正文蓝图", value=True)
+    run_articles = st.checkbox("4. 生成完整正文 Markdown", value=True)
     start = st.button("开始运行", type="primary", use_container_width=True)
 
 if not selected_categories:
@@ -301,7 +355,7 @@ if start:
         with st.status("正在运行多分类 SEO Pipeline...", expanded=True) as status:
             for category, keywords in runnable.items():
                 st.markdown(f"#### {CATEGORY_LABELS[category]}")
-                paths, logs = run_pipeline(keywords, run_name, category, run_cluster, run_titles, run_body)
+                paths, logs = run_pipeline(keywords, run_name, category, run_cluster, run_titles, run_body, run_articles)
                 paths_by_category[category] = {k: str(v) for k, v in paths.items()}
                 all_logs[category] = logs
                 for step, ok, output in logs:
@@ -327,7 +381,7 @@ else:
             paths = {k: Path(v) for k, v in raw_paths.items()}
             st.markdown(f"## {CATEGORY_LABELS.get(category, category)}")
             show_metrics(paths)
-            d1, d2, d3, d4 = st.columns(4)
+            d1, d2, d3, d4, d5 = st.columns(5)
             with d1:
                 csv_download_button(paths["cluster_audit"], "下载聚类审计 CSV")
             with d2:
@@ -336,8 +390,10 @@ else:
                 csv_download_button(paths["title_audit"], "下载标题审计 CSV")
             with d4:
                 csv_download_button(paths["body_blueprint"], "下载正文蓝图 CSV")
+            with d5:
+                csv_download_button(paths["publish_queue"], "下载发布队列 CSV")
 
-            tab1, tab2, tab3, tab4 = st.tabs(["关键词聚类", "主文章队列", "标题审计", "正文蓝图"])
+            tab1, tab2, tab3, tab4, tab5 = st.tabs(["关键词聚类", "主文章队列", "标题审计", "正文蓝图", "完整正文"])
             with tab1:
                 show_table("关键词聚类审计", paths["cluster_audit"], ["category", "keyword", "publish_role", "merge_usage", "primary_keyword", "cluster_size", "keyword_score", "score_reason"])
             with tab2:
@@ -346,3 +402,5 @@ else:
                 show_table("标题审计", paths["title_audit"], ["category", "keyword", "title", "title_shape", "ctr_angle", "title_score", "secondary_keywords", "faq_keywords", "h2_keywords"])
             with tab4:
                 show_table("正文蓝图", paths["body_blueprint"], ["category", "keyword", "title", "body_template", "target_word_count", "word_count_range", "h2_1", "h2_2", "h2_3", "faq_keywords", "content_warnings"])
+            with tab5:
+                show_article_preview(paths)
