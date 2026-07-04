@@ -77,11 +77,17 @@ class QualityReport:
     stats: dict[str, object] = field(default_factory=dict)
 
 
+def frontmatter_delimiter_count(markdown: str) -> int:
+    return sum(1 for line in markdown.splitlines() if line.strip() == "---")
+
+
 def strip_frontmatter(markdown: str) -> str:
-    if markdown.startswith("---"):
-        parts = markdown.split("---", 2)
-        if len(parts) >= 3:
-            return parts[2].strip()
+    lines = markdown.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return markdown
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            return "\n".join(lines[i + 1:]).strip()
     return markdown
 
 
@@ -117,9 +123,7 @@ def canonical_article_key(path: Path) -> str:
 
 
 def should_skip_similarity_candidate(path: Path, current_path: Path | None) -> bool:
-    if path.name.endswith(".draft.md"):
-        return True
-    if ".brief." in path.name:
+    if path.name.endswith(".draft.md") or ".brief." in path.name:
         return True
     if any(part in {"briefs", ".git", "node_modules", "__pycache__"} for part in path.parts):
         return True
@@ -181,14 +185,19 @@ def duplicate_h2_headings(markdown: str) -> list[str]:
     return dupes
 
 
+def body_contains_separator(markdown: str) -> bool:
+    body = strip_frontmatter(markdown)
+    return any(line.strip() == "---" for line in body.splitlines())
+
+
 def format_contract_issues(markdown: str) -> list[str]:
     issues: list[str] = []
     body = strip_frontmatter(markdown)
-    if markdown.count("---") != 2:
-        issues.append("frontmatter delimiter count must be exactly 2")
+    if frontmatter_delimiter_count(markdown) != 2:
+        issues.append("frontmatter line delimiter count must be exactly 2")
     if METADATA_LEAK_PATTERN.search(body):
         issues.append("body contains leaked metadata fields")
-    if "\n---\n" in body:
+    if body_contains_separator(markdown):
         issues.append("body contains markdown separator ---")
     yt_matches = re.findall(r"\[YOUTUBE_VIDEO:\s*([^\]]+)\]", markdown, flags=re.I)
     if len(yt_matches) != 1:
@@ -213,8 +222,7 @@ def evaluate_markdown(path: Path, corpus_dir: Path | None = None, min_score: int
     warnings: list[str] = []
     score = 100
 
-    contract_issues = format_contract_issues(markdown)
-    for issue in contract_issues:
+    for issue in format_contract_issues(markdown):
         issues.append(issue)
         score -= 12
 
@@ -263,7 +271,6 @@ def evaluate_markdown(path: Path, corpus_dir: Path | None = None, min_score: int
 
     score = max(0, min(100, score))
     passed = score >= min_score and not issues
-
     return QualityReport(
         path=str(path),
         score=score,
@@ -288,12 +295,10 @@ def main() -> None:
     parser.add_argument("--min-score", type=int, default=85, help="Minimum passing score.")
     parser.add_argument("--json", action="store_true", help="Print JSON reports.")
     args = parser.parse_args()
-
     target = Path(args.path).expanduser().resolve()
     corpus_dir = Path(args.corpus).expanduser().resolve() if args.corpus else None
     paths = sorted(target.rglob("*.md")) if target.is_dir() else [target]
     reports = [evaluate_markdown(path, corpus_dir=corpus_dir, min_score=args.min_score) for path in paths]
-
     if args.json:
         print(json.dumps([asdict(report) for report in reports], ensure_ascii=False, indent=2))
     else:
@@ -305,9 +310,7 @@ def main() -> None:
             for warning in report.warnings:
                 print(f"  warning: {warning}")
             print(f"  stats: {report.stats}")
-
-    failed = [report for report in reports if not report.passed]
-    if failed:
+    if any(not report.passed for report in reports):
         raise SystemExit(1)
 
 
