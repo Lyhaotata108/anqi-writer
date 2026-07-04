@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 """CTR-first SEO title engine.
 
-V3.3 keeps the approved CTR style and adds composable fragment variants so the
-same keyword pool can scale without repeating the same fixed title frame.
+V3.4 keeps the approved CTR style, adds composable fragment variants, and
+prefers a healthier mix of dash/question/editorial shapes instead of always
+falling back to colon headlines.
 """
 
 from __future__ import annotations
@@ -147,6 +148,20 @@ def score_ctr_title(title: str, keyword: str, subject: str, angle: CTRAngle, tec
         score += 8
         reasons.append("click-structure")
 
+    if "—" in title and ":" not in title:
+        score += 12
+        reasons.append("non-colon-dash-shape")
+    elif "?" in title and ":" not in title:
+        score += 10
+        reasons.append("non-colon-question-shape")
+    elif ":" in title and "—" not in title and "?" not in title:
+        score -= 12
+        reasons.append("colon-only-shape-penalty")
+
+    if re.match(r"^(before you|i looked|i checked|i compared|what to know|why )\b", title_l):
+        score += 8
+        reasons.append("editorial-opening")
+
     if angle.specificity_score >= 85:
         score += 8
         reasons.append("angle-specificity")
@@ -205,7 +220,7 @@ def generate_ctr_title_candidates(
     angle = classify_ctr_angle(keyword, intent.intent_family, subject)
     candidates: list[CTRTitleCandidate] = []
 
-    for family, pattern_id, title in generate_fragment_variants(keyword, angle.ctr_angle, ctx, limit=64):
+    for family, pattern_id, title in generate_fragment_variants(keyword, angle.ctr_angle, ctx, limit=80):
         append_ctr_candidate(
             candidates, title, family, pattern_id, keyword, subject, angle,
             existing_titles, existing_patterns, "fragment-grammar", 0.22, 0.72, 4,
