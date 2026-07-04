@@ -9,6 +9,7 @@ Run locally:
 from __future__ import annotations
 from pathlib import Path
 import csv
+import os
 import subprocess
 import sys
 import time
@@ -115,8 +116,11 @@ def merge_keywords(uploaded_keywords: list[str], pasted_keywords: list[str]) -> 
     return all_keywords
 
 
-def run_command(args: list[str]) -> tuple[bool, str]:
-    proc = subprocess.run(args, cwd=str(ROOT), text=True, capture_output=True)
+def run_command(args: list[str], env_overrides: dict[str, str] | None = None) -> tuple[bool, str]:
+    env = os.environ.copy()
+    if env_overrides:
+        env.update({k: v for k, v in env_overrides.items() if v is not None})
+    proc = subprocess.run(args, cwd=str(ROOT), text=True, capture_output=True, env=env)
     output = "\n".join(part for part in [proc.stdout, proc.stderr] if part)
     return proc.returncode == 0, output.strip()
 
@@ -145,6 +149,8 @@ def run_pipeline(
     run_titles: bool,
     run_body: bool,
     run_articles: bool,
+    use_ai_writer: bool,
+    ai_settings: dict[str, str],
 ) -> tuple[dict[str, Path], list[tuple[str, bool, str]]]:
     paths = make_run_paths(run_name, category)
     paths["keyword_input"].write_text("\n".join(keywords) + "\n", encoding="utf-8")
@@ -188,12 +194,33 @@ def run_pipeline(
         if not paths["body_blueprint"].exists():
             logs.append(("完整正文", False, "正文蓝图文件不存在，无法生成完整正文。"))
             return paths, logs
-        ok, output = run_command([
-            sys.executable, "scripts/body_writer_engine.py", str(paths["body_blueprint"]),
-            "--articles-dir", str(paths["articles_dir"]),
-            "--queue-output", str(paths["publish_queue"]),
-        ])
-        logs.append(("完整正文", ok, output))
+        if use_ai_writer:
+            if not ai_settings.get("api_key"):
+                logs.append(("AI完整正文", False, "缺少 API Key。请在左侧填写 API Key，或先关闭 AI 写作模式。"))
+                return paths, logs
+            args = [
+                sys.executable, "scripts/ai_body_writer_engine.py", str(paths["body_blueprint"]),
+                "--articles-dir", str(paths["articles_dir"]),
+                "--queue-output", str(paths["publish_queue"]),
+                "--model", ai_settings.get("model") or "gpt-4o-mini",
+                "--api-base", ai_settings.get("api_base") or "https://api.openai.com/v1",
+                "--temperature", ai_settings.get("temperature") or "0.65",
+                "--timeout", ai_settings.get("timeout") or "180",
+                "--sleep", ai_settings.get("sleep") or "0.5",
+            ]
+            if ai_settings.get("max_articles") and ai_settings.get("max_articles") != "0":
+                args.extend(["--max-articles", ai_settings["max_articles"]])
+            if ai_settings.get("overwrite") == "yes":
+                args.append("--overwrite")
+            ok, output = run_command(args, {"OPENAI_API_KEY": ai_settings.get("api_key", "")})
+            logs.append(("AI完整正文", ok, output))
+        else:
+            ok, output = run_command([
+                sys.executable, "scripts/body_writer_engine.py", str(paths["body_blueprint"]),
+                "--articles-dir", str(paths["articles_dir"]),
+                "--queue-output", str(paths["publish_queue"]),
+            ])
+            logs.append(("模板完整正文", ok, output))
     return paths, logs
 
 
@@ -289,7 +316,7 @@ def show_article_preview(paths: dict[str, Path]) -> None:
         st.info("暂时没有生成 Markdown 正文。")
         return
     st.subheader("完整正文发布队列")
-    cols = [c for c in ["keyword", "title", "word_count", "quality_status", "publish_ready", "markdown_path"] if c in publish_df.columns]
+    cols = [c for c in ["keyword", "title", "word_count", "generation_status", "quality_status", "publish_ready", "markdown_path"] if c in publish_df.columns]
     st.dataframe(publish_df[cols], use_container_width=True, height=300)
     article_options = publish_df["markdown_path"].astype(str).tolist()
     selected = st.selectbox("预览 Markdown 正文", article_options)
@@ -305,7 +332,7 @@ def show_article_preview(paths: dict[str, Path]) -> None:
 ensure_dirs()
 
 st.title("Anqi Writer SEO Pipeline")
-st.caption("支持三个分类同时跑：Weight Loss、CBD、Blood。流程：关键词聚类 → 主文章标题 → 正文蓝图 → 完整 Markdown 正文。")
+st.caption("支持三个分类同时跑：Weight Loss、CBD、Blood。流程：关键词聚类 → 主文章标题 → 正文蓝图 → AI/模板完整 Markdown 正文。")
 
 with st.sidebar:
     st.header("运行设置")
@@ -318,6 +345,28 @@ with st.sidebar:
     run_titles = st.checkbox("2. 生成标题", value=True)
     run_body = st.checkbox("3. 生成正文蓝图", value=True)
     run_articles = st.checkbox("4. 生成完整正文 Markdown", value=True)
+    use_ai_writer = st.checkbox("使用 AI 生成爆款正文", value=False)
+
+    ai_settings = {
+        "api_key": "",
+        "api_base": "https://api.openai.com/v1",
+        "model": "gpt-4o-mini",
+        "temperature": "0.65",
+        "timeout": "180",
+        "sleep": "0.5",
+        "max_articles": "0",
+        "overwrite": "no",
+    }
+    if use_ai_writer:
+        st.subheader("AI 设置")
+        ai_settings["api_key"] = st.text_input("API Key", type="password", value=os.getenv("OPENAI_API_KEY", ""))
+        ai_settings["api_base"] = st.text_input("API Base URL", value=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"))
+        ai_settings["model"] = st.text_input("Model", value=os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
+        ai_settings["temperature"] = str(st.slider("Temperature", min_value=0.1, max_value=1.2, value=0.65, step=0.05))
+        ai_settings["max_articles"] = str(st.number_input("每个分类最多生成几篇，0 = 全部", min_value=0, value=3, step=1))
+        ai_settings["sleep"] = str(st.number_input("每篇之间暂停秒数", min_value=0.0, value=0.5, step=0.5))
+        ai_settings["overwrite"] = "yes" if st.checkbox("覆盖已存在 Markdown", value=False) else "no"
+        st.caption("批量生成建议先设置 3-5 篇测试，确认质量后再改成 0 全量。API Key 只传给本次本地进程，不写入输出 CSV。")
     start = st.button("开始运行", type="primary", use_container_width=True)
 
 if not selected_categories:
@@ -355,7 +404,7 @@ if start:
         with st.status("正在运行多分类 SEO Pipeline...", expanded=True) as status:
             for category, keywords in runnable.items():
                 st.markdown(f"#### {CATEGORY_LABELS[category]}")
-                paths, logs = run_pipeline(keywords, run_name, category, run_cluster, run_titles, run_body, run_articles)
+                paths, logs = run_pipeline(keywords, run_name, category, run_cluster, run_titles, run_body, run_articles, use_ai_writer, ai_settings)
                 paths_by_category[category] = {k: str(v) for k, v in paths.items()}
                 all_logs[category] = logs
                 for step, ok, output in logs:
