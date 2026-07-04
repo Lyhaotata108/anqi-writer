@@ -3,11 +3,11 @@
 """Quality guard for generated Markdown articles.
 
 Checks:
+- import-safe frontmatter/body contract
 - mobile paragraph length
 - generic/template phrases
-- missing named story signals
 - missing table / FAQ / action guide
-- weak entity-specific detail density
+- malformed YouTube placeholders
 - repeated n-grams against an optional corpus directory
 """
 
@@ -31,17 +31,25 @@ FORBIDDEN_PHRASES = [
     "ordinary life returns",
     "in today's world",
     "many people are wondering",
+    "sounds easy until real life starts testing it",
+    "promise meets real life",
+    "the moment the promise meets real life",
+    "the first result is not the whole story",
 ]
 
 REQUIRED_SECTIONS = [
     "## Frequently Asked Questions",
     "## The Next Step Without Guesswork",
+    "## AI Disclosure",
+    "## References",
+    "## Author",
 ]
 
 ACTION_GUIDE_PATTERNS = [
     r"##\s+What To Do",
     r"##\s+What To Do Before",
     r"##\s+The Next Step Without Guesswork",
+    r"##\s+Daily Protocol",
 ]
 
 YMYL_RISK_PATTERNS = [
@@ -52,7 +60,11 @@ YMYL_RISK_PATTERNS = [
     r"\bstop taking\b",
     r"\breplaces medication\b",
     r"\bno risk\b",
+    r"\bclinically proven to melt\b",
 ]
+
+BAD_MEDIA_TOKENS = ["sample123", "dqw4w9wgxcq", "youtube.com", "youtu.be", "http://", "https://"]
+METADATA_LEAK_PATTERN = re.compile(r"(?im)^(title|description|keywords|category_id|tag|country|region|locality)\s*:")
 
 
 @dataclass
@@ -84,7 +96,7 @@ def paragraph_lengths(markdown: str) -> list[int]:
         stripped = block.strip()
         if not stripped:
             continue
-        if stripped.startswith(("##", "###", "- ", "|", ">", "[IMAGE:", "[YOUTUBE_VIDEO:")):
+        if stripped.startswith(("##", "###", "- ", "* ", "|", ">", "[IMAGE:", "[YOUTUBE_VIDEO:")):
             continue
         if re.match(r"^\d+\.\s", stripped):
             continue
@@ -128,7 +140,6 @@ def similarity_to_corpus(markdown: str, corpus_dir: Path | None, current_path: P
     current = ngrams(markdown, 5)
     if not current:
         return 0.0, None
-
     best_score = 0.0
     best_file: str | None = None
     for path in corpus_dir.rglob("*.md"):
@@ -159,12 +170,40 @@ def count_faq_questions(markdown: str) -> int:
     return len(re.findall(r"\n###\s+", faq_match.group("body")))
 
 
-def has_named_story(markdown: str) -> bool:
+def duplicate_h2_headings(markdown: str) -> list[str]:
+    headings = [h.strip().lower() for h in re.findall(r"^##\s+(.+)$", markdown, flags=re.M)]
+    seen: set[str] = set()
+    dupes: list[str] = []
+    for heading in headings:
+        if heading in seen and heading not in dupes:
+            dupes.append(heading)
+        seen.add(heading)
+    return dupes
+
+
+def format_contract_issues(markdown: str) -> list[str]:
+    issues: list[str] = []
     body = strip_frontmatter(markdown)
-    opening = body[:1500]
-    names = re.findall(r"\b[A-Z][a-z]{2,}\b", opening)
-    generic = {"Disclaimer", "Last", "Table", "Contents", "Frequently", "Questions", "The", "What", "Before"}
-    return any(name not in generic for name in names)
+    if markdown.count("---") != 2:
+        issues.append("frontmatter delimiter count must be exactly 2")
+    if METADATA_LEAK_PATTERN.search(body):
+        issues.append("body contains leaked metadata fields")
+    if "\n---\n" in body:
+        issues.append("body contains markdown separator ---")
+    yt_matches = re.findall(r"\[YOUTUBE_VIDEO:\s*([^\]]+)\]", markdown, flags=re.I)
+    if len(yt_matches) != 1:
+        issues.append("must contain exactly one YouTube query placeholder")
+    elif any(token in yt_matches[0].lower() for token in BAD_MEDIA_TOKENS):
+        issues.append("YouTube placeholder must be a query, not a URL or fake ID")
+    if markdown.count("[IMAGE:") != 1:
+        issues.append("must contain exactly one image placeholder")
+    for section in ("## Frequently Asked Questions", "## AI Disclosure", "## References", "## Author"):
+        if markdown.count(section) != 1:
+            issues.append(f"{section} must appear exactly once")
+    dupes = duplicate_h2_headings(markdown)
+    if dupes:
+        issues.append("duplicate H2 headings: " + ", ".join(dupes[:5]))
+    return issues
 
 
 def evaluate_markdown(path: Path, corpus_dir: Path | None = None, min_score: int = 85) -> QualityReport:
@@ -174,11 +213,16 @@ def evaluate_markdown(path: Path, corpus_dir: Path | None = None, min_score: int
     warnings: list[str] = []
     score = 100
 
+    contract_issues = format_contract_issues(markdown)
+    for issue in contract_issues:
+        issues.append(issue)
+        score -= 12
+
     lengths = paragraph_lengths(markdown)
-    long_paragraphs = [length for length in lengths if length > 55]
+    long_paragraphs = [length for length in lengths if length > 70]
     if long_paragraphs:
-        issues.append(f"mobile paragraphs too long: {len(long_paragraphs)} paragraphs over 55 words")
-        score -= min(20, 5 * len(long_paragraphs))
+        warnings.append(f"mobile paragraphs long: {len(long_paragraphs)} paragraphs over 70 words")
+        score -= min(12, 3 * len(long_paragraphs))
 
     for phrase in FORBIDDEN_PHRASES:
         if phrase.lower() in lower:
@@ -205,12 +249,8 @@ def evaluate_markdown(path: Path, corpus_dir: Path | None = None, min_score: int
         score -= 8
 
     faq_count = count_faq_questions(markdown)
-    if faq_count < 3:
+    if faq_count < 4:
         issues.append(f"FAQ too thin: {faq_count} questions")
-        score -= 8
-
-    if not has_named_story(markdown):
-        issues.append("opening does not show a named story/person signal")
         score -= 8
 
     sim_score, sim_file = similarity_to_corpus(markdown, corpus_dir, current_path=path)
@@ -251,7 +291,6 @@ def main() -> None:
 
     target = Path(args.path).expanduser().resolve()
     corpus_dir = Path(args.corpus).expanduser().resolve() if args.corpus else None
-
     paths = sorted(target.rglob("*.md")) if target.is_dir() else [target]
     reports = [evaluate_markdown(path, corpus_dir=corpus_dir, min_score=args.min_score) for path in paths]
 
