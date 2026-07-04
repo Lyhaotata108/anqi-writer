@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Score and de-duplicate SEO title candidates."""
+"""Score and de-duplicate SEO title candidates.
+
+V3.7 adds batch-level title shape balancing so the generator does not overuse
+one punctuation style, especially dash-led headlines.
+"""
 
 from __future__ import annotations
 
@@ -38,6 +42,61 @@ def title_frame_key(title: str) -> str:
     frame = re.sub(r"\b20\d{2}\b", "year", frame.lower())
     frame = re.sub(r"[^a-z0-9]+", "-", frame).strip("-")
     return frame or "whole-title"
+
+
+def title_shape_key(title: str) -> str:
+    raw = str(title or "").strip().lower()
+    if re.match(r"^(i looked|i checked|i compared)\b", raw):
+        return "editorial"
+    if raw.startswith("before you "):
+        return "before"
+    if "?" in raw:
+        return "question"
+    if "—" in raw:
+        return "dash"
+    if ":" in raw:
+        return "colon"
+    return "natural"
+
+
+def title_shape_counts(existing_titles: Iterable[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for title in existing_titles:
+        shape = title_shape_key(title)
+        counts[shape] = counts.get(shape, 0) + 1
+    return counts
+
+
+def shape_balance_adjustment(title: str, existing_titles: list[str]) -> tuple[int, list[str]]:
+    if len(existing_titles) < 20:
+        return 0, []
+    shape = title_shape_key(title)
+    counts = title_shape_counts(existing_titles)
+    total = max(1, len(existing_titles))
+    current_ratio = counts.get(shape, 0) / total
+    caps = {
+        "dash": 0.62,
+        "colon": 0.24,
+        "question": 0.30,
+        "before": 0.12,
+        "editorial": 0.14,
+        "natural": 0.10,
+    }
+    penalty = 0
+    reasons: list[str] = []
+    cap = caps.get(shape, 0.25)
+    if current_ratio > cap:
+        penalty = min(36, int((current_ratio - cap) * 100) + 8)
+        reasons.append(f"shape-overuse-penalty:{shape}:{current_ratio:.2f}")
+
+    bonus = 0
+    if shape in {"question", "colon", "before", "editorial", "natural"} and current_ratio < 0.10:
+        bonus = 10
+        reasons.append(f"underused-shape-bonus:{shape}")
+    if shape == "dash" and current_ratio < 0.45:
+        bonus = max(bonus, 4)
+        reasons.append("dash-still-usable")
+    return bonus - penalty, reasons
 
 
 def word_ngrams(text: str, n: int = 4) -> set[tuple[str, ...]]:
@@ -96,6 +155,11 @@ def score_title(title: str, keyword: str, family: str, pattern_id: str, existing
         penalty = min(54, repeated_frame_count * 9)
         score -= penalty
         reasons.append(f"repeated-frame-penalty:{repeated_frame_count}")
+
+    shape_adjustment, shape_reasons = shape_balance_adjustment(title, existing_titles)
+    if shape_adjustment:
+        score += shape_adjustment
+    reasons.extend(shape_reasons)
 
     for phrase in BANNED_TITLE_PHRASES:
         if phrase in title_l:
