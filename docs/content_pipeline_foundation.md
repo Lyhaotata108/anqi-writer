@@ -89,7 +89,21 @@ python3 scripts/variation_engine.py "berberine weight loss"
 python3 scripts/variation_engine.py "berberine weight loss" --json
 ```
 
-## 5. Quality guard
+## 5. Brief-driven article writer
+
+File:
+
+```text
+scripts/brief_article_writer.py
+```
+
+Purpose:
+
+- Convert a `VariationBrief` into the actual Markdown article body.
+- Use the selected story name, scene, social hook, pain details, comparison angle, FAQ angles, safety boundaries, and source profile.
+- This replaces the old browser UI behavior where the brief was saved but not used to control the final article body.
+
+## 6. Quality guard
 
 File:
 
@@ -101,6 +115,7 @@ Purpose:
 
 - Score generated Markdown articles.
 - Check mobile paragraph length, generic phrases, missing FAQ, missing action guide, missing table, weak named-story signal, YMYL risk wording, and similarity to an optional corpus.
+- Similarity checks now ignore draft files, brief files, and same-slug files to reduce false positives.
 
 Run one file:
 
@@ -133,9 +148,10 @@ output/briefs/ui_<keyword>.brief.txt
 ```
 
 3. It logs the lane, entity, intent, scene, and brief filename.
-4. After generation, it runs `quality_guard.py` logic automatically.
-5. Each result includes `quality_score`, `quality_passed`, `quality_issues`, `quality_warnings`, and the brief paths.
-6. The UI summary shows quality score and PASS/REVIEW status per article.
+4. It passes the brief into `scripts/brief_article_writer.py`, so the generated article body now follows the brief directly.
+5. After generation, it runs `quality_guard.py` logic automatically.
+6. Each result includes `quality_score`, `quality_passed`, `quality_issues`, `quality_warnings`, and the brief paths.
+7. The UI summary shows quality score and PASS/REVIEW status per article.
 
 ## Recommended safe workflow
 
@@ -149,10 +165,7 @@ output/briefs/ui_<keyword>.brief.txt
 
 ## Still pending
 
-The browser UI now creates and stores variation briefs and runs quality guard, but the article writer still needs deeper integration so the generated article body fully follows each variation brief.
+The browser UI now makes the final body follow the variation brief, but two large-scale safeguards are still pending:
 
-Next steps:
-
-- Inject the variation brief directly into the article body builder.
 - Use quality guard failures to trigger automatic rewrite/repair.
 - Feed secondary keywords from clustering into each article brief.
