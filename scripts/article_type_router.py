@@ -34,13 +34,54 @@ def matches(text: str, pattern: str) -> bool:
     return re.search(pattern, text, flags=re.I) is not None
 
 
+def looks_like_public_figure(keyword: str, classification: dict | None) -> bool:
+    page_type = normalize((classification or {}).get("page_type", ""))
+    entity = str((classification or {}).get("entity", "")).strip()
+    if page_type in {"viral_truth", "public_figure", "celebrity_profile"} and len(entity.split()) >= 2:
+        return True
+    return bool(matches(keyword, r"\b(weight loss journey|transformation|before and after)\b") and len(keyword.split()) >= 3)
+
+
 def route_article_type(keyword: str, classification: dict | None = None) -> ArticleRoute:
     k = normalize(keyword)
     intent = normalize((classification or {}).get("intent", ""))
     page_type = normalize((classification or {}).get("page_type", ""))
 
-    # 1. Shopping/list intent. Must produce real options, not a generic guide.
-    if matches(k, r"\b(top\s*\d+|top\s+ten|best|ranked|ranking|list of|which .+ best|reviews?|reviewed|products?)\b"):
+    # 1. Public figure / viral transformation profiles need fact-check structure.
+    if looks_like_public_figure(k, classification):
+        return ArticleRoute(
+            article_type="public_figure_profile",
+            reason="public figure or viral transformation query",
+            title_style="Timeline/results/what-is-public headline",
+            required_structure=[
+                "What Is Publicly Known",
+                "Timeline",
+                "What The Person Actually Said",
+                "What Is Media Speculation",
+                "What Readers Should Not Copy Blindly",
+                "FAQ",
+            ],
+        )
+
+    # 2. Reviews, trials, tested, lab-test, and 'really work' queries.
+    if matches(k, r"\b(reviews?|users?|reddit|trials?|tested|lab tests?|really work|actually work|real results|what .* say)\b"):
+        return ArticleRoute(
+            article_type="review_analysis",
+            reason="reviews/tested/user-report search intent",
+            title_style="Reviews/tested/results headline with safety angle",
+            required_structure=[
+                "Quick Verdict",
+                "What Was Reviewed",
+                "What Users Report",
+                "What The Evidence Does Not Show",
+                "Safety Notes",
+                "FAQ",
+                "Next Steps Without the Guesswork",
+            ],
+        )
+
+    # 3. Shopping/list intent. Must produce real options, not a generic guide.
+    if matches(k, r"\b(top\s*\d+|top\s+ten|best|ranked|ranking|list of|which .+ best)\b"):
         return ArticleRoute(
             article_type="top_10_listicle",
             reason="ranking/listicle/commercial research intent",
@@ -57,7 +98,7 @@ def route_article_type(keyword: str, classification: dict | None = None) -> Arti
             ],
         )
 
-    # 2. Explicit comparison decisions.
+    # 4. Explicit comparison decisions.
     if has_any(k, [" vs ", " versus ", "compare", "comparison", "better than", "instead of", "which is better"]) or intent == "comparison":
         return ArticleRoute(
             article_type="comparison_decision",
@@ -74,7 +115,7 @@ def route_article_type(keyword: str, classification: dict | None = None) -> Arti
             ],
         )
 
-    # 3. Regulated / YMYL safety, interaction, pregnancy, and drug-test intents.
+    # 5. Regulated / YMYL safety, interaction, pregnancy, and drug-test intents.
     if has_any(k, [
         "side effect", "side effects", "safe", "safety", "hurt", "danger", "risk", "risks",
         "warning", "warnings", "interaction", "interact", "contraindication", "too low",
@@ -96,7 +137,7 @@ def route_article_type(keyword: str, classification: dict | None = None) -> Arti
             ],
         )
 
-    # 4. Dosage / amount intent. Works for supplements, foods, drinks, medications.
+    # 6. Dosage / amount intent. Works for supplements, foods, drinks, medications.
     if matches(k, r"\b(how much|how many|dose|dosage|mg|milligram|grams?|gummies?|capsules?|pills?|drops?|servings?)\b") or intent == "dosage":
         return ArticleRoute(
             article_type="dosage_guide",
@@ -113,7 +154,7 @@ def route_article_type(keyword: str, classification: dict | None = None) -> Arti
             ],
         )
 
-    # 5. Timing / duration / onset intent.
+    # 7. Timing / duration / onset intent.
     if matches(k, r"\b(when to take|best time|morning|night|before bed|with food|empty stomach|how long|how fast|how soon|time to|take effect|start working)\b") or intent in {"timing", "how_long"}:
         return ArticleRoute(
             article_type="timing_guide",
@@ -130,7 +171,7 @@ def route_article_type(keyword: str, classification: dict | None = None) -> Arti
             ],
         )
 
-    # 6. Symptom / meaning / diagnostic-adjacent explainer intent.
+    # 8. Symptom / meaning / diagnostic-adjacent explainer intent.
     if matches(k, r"\b(symptoms?|signs?|why do i|why am i|what causes|cause of|meaning|means|normal|high|low|after eating|fasting)\b") or page_type in {"symptom_explainer", "condition_explainer"}:
         return ArticleRoute(
             article_type="symptom_explainer",
@@ -147,7 +188,7 @@ def route_article_type(keyword: str, classification: dict | None = None) -> Arti
             ],
         )
 
-    # 7. Cost / insurance / affordability intent.
+    # 9. Cost / insurance / affordability intent.
     if matches(k, r"\b(cost|price|expensive|cheap|affordable|insurance|covered|coverage|copay|coupon|discount|worth it|money)\b"):
         return ArticleRoute(
             article_type="cost_review",
@@ -164,7 +205,7 @@ def route_article_type(keyword: str, classification: dict | None = None) -> Arti
             ],
         )
 
-    # 8. Professional process / how-it-works explainers.
+    # 10. Professional process / how-it-works explainers.
     if matches(k, r"\b(what does|how does|how do|what is|how to|process|steps|appointment|consultation|program|plan|guide)\b"):
         return ArticleRoute(
             article_type="process_explainer",
@@ -181,7 +222,7 @@ def route_article_type(keyword: str, classification: dict | None = None) -> Arti
             ],
         )
 
-    # 9. Evidence/review and does-it-work intents.
+    # 11. Evidence/review and does-it-work intents.
     if has_any(k, [
         "review", "tested", "tracked", "does it work", "actually work", "results", "before and after",
         "metabolism booster", "weight loss supplement", "fat burner", "berberine", "apple cider vinegar",
