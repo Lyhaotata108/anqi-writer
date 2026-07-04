@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Check whether the local browser UI is wired to the sample-style writer."""
+"""Check whether the local browser UI is wired to the batch-safe writer."""
 
 from __future__ import annotations
 
 from pathlib import Path
-import sys
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -22,12 +21,16 @@ def main() -> int:
         issues.append("browser_ui.py is not calling generate_sample_style_article")
     if "brief_article_writer" in browser:
         issues.append("browser_ui.py still imports brief_article_writer")
-    if "Sample Style Generator" not in browser:
-        issues.append("browser_ui.py does not show the Sample Style Generator UI label")
-    if "FORBIDDEN_STYLE_PHRASES" not in sample:
-        issues.append("sample_style_writer.py is missing forbidden phrase guard")
-    if "raise RuntimeError" not in sample:
-        issues.append("sample_style_writer.py may not hard-fail bad drafts")
+    if "Batch-Safe Generator" not in browser:
+        issues.append("browser_ui.py does not show the Batch-Safe Generator UI label")
+    if "PASS-only" not in browser and "PASS articles only" not in browser:
+        issues.append("browser_ui.py does not appear to enforce PASS-only import")
+    if "batch_reports" not in browser:
+        issues.append("browser_ui.py does not appear to write batch reports")
+    if "strict JSON" not in sample.lower() and "STRICT JSON" not in sample:
+        issues.append("sample_style_writer.py is not using JSON-schema generation")
+    if "assemble_markdown" not in sample:
+        issues.append("sample_style_writer.py is missing code-side markdown assembly")
 
     if issues:
         print("WRITER MODE CHECK: FAIL")
@@ -36,9 +39,11 @@ def main() -> int:
         return 1
 
     print("WRITER MODE CHECK: PASS")
-    print("browser_ui.py is wired to sample_style_writer.py")
-    print("Expected page title: AnQiCMS Sample Style Generator")
-    print("Expected logs: [Keyword], [Route], [Writing], [Quality]")
+    print("browser_ui.py is wired to schema-driven sample_style_writer.py")
+    print("Expected page title: AnQiCMS Batch-Safe Generator")
+    print("Expected logs: [Keyword], [Route], [Writing], [Quality], [Batch Risk]")
+    print("Expected reports: output/batch_reports/batch_<job_id>.json and .csv")
+    print("Expected import behavior: PASS-only")
     return 0
 
 
