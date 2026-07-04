@@ -11,6 +11,7 @@ import sys
 
 from title_engine import generate_title_metadata
 from title_intent_classifier import classify_title_intent
+from title_scorer import title_frame_key
 
 
 def read_keywords(path: Path) -> list[str]:
@@ -32,6 +33,7 @@ def main() -> int:
     used_titles = []
     used_patterns = set()
     seen_clusters = {}
+    seen_frames = {}
     for keyword in read_keywords(input_path):
         intent = classify_title_intent(keyword)
         meta = generate_title_metadata(keyword, classification=asdict(intent), existing_titles=used_titles, existing_patterns=used_patterns)
@@ -40,6 +42,12 @@ def main() -> int:
         cluster_status = "primary" if not cluster_first_keyword else "duplicate"
         if not cluster_first_keyword:
             seen_clusters[cluster_key] = keyword
+
+        frame_key = title_frame_key(meta["title"])
+        frame_first_keyword = seen_frames.get(frame_key, "")
+        frame_status = "fresh_frame" if not frame_first_keyword else "reused_frame"
+        if not frame_first_keyword:
+            seen_frames[frame_key] = keyword
 
         used_titles.append(meta["title"])
         used_patterns.add(meta["pattern"])
@@ -50,6 +58,9 @@ def main() -> int:
             "cluster_key": cluster_key,
             "cluster_status": cluster_status,
             "cluster_first_keyword": cluster_first_keyword,
+            "title_frame_key": frame_key,
+            "title_frame_status": frame_status,
+            "title_frame_first_keyword": frame_first_keyword,
             "intent_family": intent.intent_family,
             "entity_type": intent.entity_type,
             "modifier": intent.modifier,
@@ -71,7 +82,8 @@ def main() -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     fields = [
         "keyword", "canonical_subject", "canonical_question", "cluster_key", "cluster_status",
-        "cluster_first_keyword", "intent_family", "entity_type", "modifier", "page_type",
+        "cluster_first_keyword", "title_frame_key", "title_frame_status", "title_frame_first_keyword",
+        "intent_family", "entity_type", "modifier", "page_type",
         "ctr_angle", "click_trigger", "risk_trigger", "specificity_score",
         "title_family", "pattern_id", "technical_score", "ctr_score", "title_score", "title", "reason",
     ]
@@ -81,9 +93,11 @@ def main() -> int:
         writer.writerows(rows)
 
     duplicate_count = sum(1 for row in rows if row["cluster_status"] == "duplicate")
+    reused_frames = sum(1 for row in rows if row["title_frame_status"] == "reused_frame")
     low_ctr = sum(1 for row in rows if int(row["ctr_score"] or 0) < 75)
     print(f"Wrote {len(rows)} rows to {out}")
     print(f"Clusters: {len(seen_clusters)} primary · {duplicate_count} duplicate")
+    print(f"Frames: {len(seen_frames)} unique · {reused_frames} reused")
     print(f"Low CTR rows: {low_ctr}")
     return 0
 
