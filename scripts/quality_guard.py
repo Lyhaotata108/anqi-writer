@@ -18,7 +18,6 @@ import argparse
 import json
 import re
 from pathlib import Path
-from collections import Counter
 
 
 FORBIDDEN_PHRASES = [
@@ -98,6 +97,31 @@ def ngrams(text: str, n: int = 5) -> set[tuple[str, ...]]:
     return {tuple(toks[i:i+n]) for i in range(max(0, len(toks) - n + 1))}
 
 
+def canonical_article_key(path: Path) -> str:
+    name = path.name
+    if name.endswith(".draft.md"):
+        name = name[:-9] + ".md"
+    return name
+
+
+def should_skip_similarity_candidate(path: Path, current_path: Path | None) -> bool:
+    if path.name.endswith(".draft.md"):
+        return True
+    if ".brief." in path.name:
+        return True
+    if any(part in {"briefs", ".git", "node_modules", "__pycache__"} for part in path.parts):
+        return True
+    if current_path:
+        try:
+            if path.resolve() == current_path.resolve():
+                return True
+        except FileNotFoundError:
+            return True
+        if canonical_article_key(path) == canonical_article_key(current_path):
+            return True
+    return False
+
+
 def similarity_to_corpus(markdown: str, corpus_dir: Path | None, current_path: Path | None = None) -> tuple[float, str | None]:
     if not corpus_dir or not corpus_dir.exists():
         return 0.0, None
@@ -108,7 +132,7 @@ def similarity_to_corpus(markdown: str, corpus_dir: Path | None, current_path: P
     best_score = 0.0
     best_file: str | None = None
     for path in corpus_dir.rglob("*.md"):
-        if current_path and path.resolve() == current_path.resolve():
+        if should_skip_similarity_candidate(path, current_path):
             continue
         try:
             other_text = path.read_text(encoding="utf-8")
@@ -136,7 +160,6 @@ def count_faq_questions(markdown: str) -> int:
 
 
 def has_named_story(markdown: str) -> bool:
-    # Simple signal: at least one capitalized first-name-like token appears in opening body.
     body = strip_frontmatter(markdown)
     opening = body[:1500]
     names = re.findall(r"\b[A-Z][a-z]{2,}\b", opening)
