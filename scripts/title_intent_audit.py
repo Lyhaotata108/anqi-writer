@@ -2,10 +2,8 @@
 # -*- coding: utf-8 -*-
 """Audit title intent classification and CTR title output.
 
-V3.8 supports the new pipeline where keyword_cluster_engine.py first selects
-primary article keywords. When the input is primary_article_queue_v1.csv, titles
-are generated only for primary articles and secondary keywords are carried into
-later body/FAQ planning.
+V3.9 reads category from primary_article_queue_v1.csv and generates titles for
+weight_loss, cbd, or blood categories using category-aware intent rules.
 """
 
 from __future__ import annotations
@@ -21,7 +19,18 @@ from title_intent_classifier import classify_title_intent
 from title_scorer import title_frame_key, title_shape_key
 
 
-def read_keyword_records(path: Path) -> list[dict[str, Any]]:
+def clean_category(value: str) -> str:
+    raw = str(value or "weight_loss").strip().lower().replace("-", "_").replace(" ", "_")
+    if raw in {"weight", "weightloss", "weight_loss"}:
+        return "weight_loss"
+    if raw in {"cbd", "hemp"}:
+        return "cbd"
+    if raw in {"blood", "blood_health", "blood_sugar", "blood_pressure"}:
+        return "blood"
+    return "weight_loss"
+
+
+def read_keyword_records(path: Path, default_category: str) -> list[dict[str, Any]]:
     if path.suffix.lower() == ".csv":
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
@@ -34,7 +43,9 @@ def read_keyword_records(path: Path) -> list[dict[str, Any]]:
                 keyword = str(row.get(keyword_field, "")).strip()
                 if not keyword:
                     continue
+                category = clean_category(row.get(fields.get("category", ""), default_category) if fields.get("category") else default_category)
                 records.append({
+                    "category": category,
                     "keyword": keyword,
                     "source_cluster_key": row.get(fields.get("cluster_key", ""), "") if fields.get("cluster_key") else "",
                     "source_cluster_size": row.get(fields.get("cluster_size", ""), "") if fields.get("cluster_size") else "",
@@ -47,12 +58,13 @@ def read_keyword_records(path: Path) -> list[dict[str, Any]]:
                     "source_type": "primary_article_queue" if fields.get("primary_keyword") else "csv_keywords",
                 })
             return records
-    return [{"keyword": line.strip(), "source_type": "plain_keywords"} for line in path.read_text(encoding="utf-8", errors="ignore").splitlines() if line.strip()]
+    return [{"category": clean_category(default_category), "keyword": line.strip(), "source_type": "plain_keywords"} for line in path.read_text(encoding="utf-8", errors="ignore").splitlines() if line.strip()]
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Classify keyword title intents and preview CTR-first generated titles.")
     parser.add_argument("input", help="Plain-text keyword file or primary_article_queue CSV")
+    parser.add_argument("--category", default="weight_loss", choices=["weight_loss", "cbd", "blood"])
     parser.add_argument("--output", default="output/title_intent_audit.csv")
     args = parser.parse_args()
 
@@ -61,7 +73,7 @@ def main() -> int:
         print(f"Input not found: {input_path}", file=sys.stderr)
         return 2
 
-    records = read_keyword_records(input_path)
+    records = read_keyword_records(input_path, args.category)
     input_is_primary_queue = any(record.get("source_type") == "primary_article_queue" for record in records)
 
     rows = []
@@ -72,9 +84,13 @@ def main() -> int:
     seen_shapes = {}
     for record in records:
         keyword = record["keyword"]
-        intent = classify_title_intent(keyword)
-        meta = generate_title_metadata(keyword, classification=asdict(intent), existing_titles=used_titles, existing_patterns=used_patterns)
+        category = clean_category(record.get("category", args.category))
+        intent = classify_title_intent(keyword, category)
+        meta = generate_title_metadata(keyword, article_type=category, classification={**asdict(intent), "category": category}, existing_titles=used_titles, existing_patterns=used_patterns)
         cluster_key = record.get("source_cluster_key") or meta.get("cluster_key")
+        if not str(cluster_key).startswith(f"{category}__"):
+            cluster_key = f"{category}__{cluster_key}"
+
         if input_is_primary_queue:
             cluster_first_keyword = ""
             cluster_status = "primary"
@@ -99,6 +115,7 @@ def main() -> int:
         used_titles.append(meta["title"])
         used_patterns.add(meta["pattern"])
         rows.append({
+            "category": category,
             "keyword": keyword,
             "canonical_subject": meta.get("subject"),
             "canonical_question": meta.get("question"),
@@ -135,15 +152,7 @@ def main() -> int:
 
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
-    fields = [
-        "keyword", "canonical_subject", "canonical_question", "cluster_key", "cluster_status",
-        "cluster_first_keyword", "source_cluster_size", "source_primary_score",
-        "secondary_keywords", "faq_keywords", "h2_keywords", "semantic_keywords", "all_cluster_keywords",
-        "title_frame_key", "title_frame_status", "title_frame_first_keyword", "title_shape",
-        "intent_family", "entity_type", "modifier", "page_type",
-        "ctr_angle", "click_trigger", "risk_trigger", "specificity_score",
-        "title_family", "pattern_id", "technical_score", "ctr_score", "title_score", "title", "reason",
-    ]
+    fields = ["category", "keyword", "canonical_subject", "canonical_question", "cluster_key", "cluster_status", "cluster_first_keyword", "source_cluster_size", "source_primary_score", "secondary_keywords", "faq_keywords", "h2_keywords", "semantic_keywords", "all_cluster_keywords", "title_frame_key", "title_frame_status", "title_frame_first_keyword", "title_shape", "intent_family", "entity_type", "modifier", "page_type", "ctr_angle", "click_trigger", "risk_trigger", "specificity_score", "title_family", "pattern_id", "technical_score", "ctr_score", "title_score", "title", "reason"]
     with out.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
@@ -154,8 +163,10 @@ def main() -> int:
     low_ctr = sum(1 for row in rows if int(row["ctr_score"] or 0) < 75)
     shape_summary = ", ".join(f"{k}:{v}" for k, v in sorted(seen_shapes.items()))
     mode = "primary_article_queue" if input_is_primary_queue else "raw_keyword_list"
+    category_summary = ", ".join(f"{k}:{sum(1 for r in rows if r['category'] == k)}" for k in sorted({r["category"] for r in rows}))
     print(f"Wrote {len(rows)} rows to {out}")
     print(f"Input mode: {mode}")
+    print(f"Categories: {category_summary}")
     print(f"Clusters: {len(seen_clusters)} primary · {duplicate_count} duplicate")
     print(f"Frames: {len(seen_frames)} unique · {reused_frames} reused")
     print(f"Shapes: {shape_summary}")
