@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 """Clean long-tail keywords into usable title subjects and questions.
 
-V2.1:
+V3.5:
 - Keep timing / injection-site / tea subtype / protein drink signals.
-- Avoid ugly subjects like "Weight Loss Pills Work" or "Take Berberine".
+- Avoid ugly subjects like Weight Loss Pills Work / Weight Loss Pills That.
 - Emit stable cluster keys for de-duplication.
 """
 
@@ -66,6 +66,15 @@ def remove_noise(text: str) -> str:
     k = re.sub(r"\b(pdf|today|pictures?|photos?|before and after pictures|before after)\b", " ", k)
     k = re.sub(r"\b(reviews?|results?|reddit)\b$", " ", k)
     return re.sub(r"\s+", " ", k).strip()
+
+
+def clean_subject_tail(text: str) -> str:
+    text = re.sub(r"\b(that|which|where|who|work|works|actually|really|help|helps)\b\s*$", "", str(text or ""), flags=re.I)
+    text = re.sub(r"\bThat\b\s*$", "", text).strip()
+    text = re.sub(r"\s+", " ", text).strip(" -,:;")
+    if re.fullmatch(r"Weight Loss Pills", text, flags=re.I):
+        return "Weight Loss Pills"
+    return text or "Article"
 
 
 def public_subject(k: str) -> str | None:
@@ -174,7 +183,8 @@ def food_subject(k: str) -> str | None:
 
 def strip_question_prefix(k: str) -> str:
     k = re.sub(r"^(how do you|how to|what is|what are|when to|best time to|does|do|is|are|can|will|should)\s+", "", k)
-    k = re.sub(r"\b(help with|good for|really work|actually work|work)\b", "", k)
+    k = re.sub(r"\b(help with|good for|really work|actually work|work|works)\b", "", k)
+    k = re.sub(r"\b(that|which|where|who)\b\s*$", "", k)
     return re.sub(r"\s+", " ", k).strip()
 
 
@@ -183,9 +193,9 @@ def canonicalize_title_subject(keyword: str) -> str:
     for resolver in (public_subject, timing_subject, injection_subject, recipe_subject, food_subject, medication_subject):
         value = resolver(k)
         if value:
-            return value
+            return clean_subject_tail(value)
     cleaned = strip_question_prefix(k)
-    return title_case(cleaned)
+    return clean_subject_tail(title_case(cleaned))
 
 
 def clean_question(k: str) -> str:
