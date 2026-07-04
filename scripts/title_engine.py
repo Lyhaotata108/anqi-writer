@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """CTR-first SEO title engine.
 
-V3 keeps the V2.1 technical guardrails but chooses titles by CTR angle first.
+V3.3 keeps the approved CTR style and adds composable fragment variants so the
+same keyword pool can scale without repeating the same fixed title frame.
 """
 
 from __future__ import annotations
@@ -18,7 +19,8 @@ from ctr_angle_classifier import CTRAngle, classify_ctr_angle
 from ctr_title_pattern_bank import CTR_STRONG_TOKENS, CTR_TITLE_PATTERNS, CTR_WEAK_PHRASES
 from title_intent_classifier import TitleIntent, classify_title_intent
 from title_pattern_bank import FAMILY_PRIORITY, TITLE_PATTERNS
-from title_scorer import TitleCandidate, score_title, select_best
+from title_scorer import TitleCandidate, score_title
+from title_variant_generator import generate_fragment_variants
 
 
 @dataclass(frozen=True)
@@ -127,17 +129,17 @@ def score_ctr_title(title: str, keyword: str, subject: str, angle: CTRAngle, tec
         score += min(28, 12 + 4 * len(strong_hits))
         reasons.append("strong-ctr-trigger:" + ",".join(strong_hits[:3]))
 
-    conflict_tokens = ["but", "until", "miss", "fails", "avoid", "hidden", "red flag", "wrong", "less clean", "speculation", "don’t prove", "hard later"]
+    conflict_tokens = ["but", "until", "miss", "fails", "avoid", "hidden", "red flag", "wrong", "less clean", "speculation", "don’t prove", "don't prove", "hard later", "tradeoff", "plateau"]
     if any(token in title_l for token in conflict_tokens):
         score += 16
         reasons.append("curiosity-conflict")
 
-    specificity_tokens = [str(datetime.now().year), "30 days", "first month", "dose", "insurance", "money", "cost", "spending", "photos", "tiktok", "injection", "side effect"]
+    specificity_tokens = [str(datetime.now().year), "30 days", "first month", "dose", "insurance", "money", "cost", "spending", "photos", "tiktok", "injection", "side effect", "week", "routine"]
     if any(token in title_l for token in specificity_tokens):
         score += 12
         reasons.append("specific-detail")
 
-    if re.search(r"\b(i looked|i checked|i compared|i’d|people|users|fans|tiktok)\b", title_l):
+    if re.search(r"\b(i looked|i checked|i compared|i’d|i'd|people|users|fans|tiktok)\b", title_l):
         score += 10
         reasons.append("editorial-or-user-frame")
 
@@ -165,33 +167,67 @@ def score_ctr_title(title: str, keyword: str, subject: str, angle: CTRAngle, tec
     return max(0, min(100, score)), reasons
 
 
-def generate_ctr_title_candidates(keyword: str, article_type: str = "", classification: dict[str, Any] | None = None, year: int | None = None, existing_titles: list[str] | None = None, existing_patterns: set[str] | None = None) -> list[CTRTitleCandidate]:
+def append_ctr_candidate(
+    out: list[CTRTitleCandidate],
+    title: str,
+    family: str,
+    pattern_id: str,
+    keyword: str,
+    subject: str,
+    angle: CTRAngle,
+    existing_titles: list[str] | None,
+    existing_patterns: set[str] | None,
+    source_reason: str,
+    technical_weight: float,
+    ctr_weight: float,
+    base_adjustment: int = 0,
+) -> None:
+    title = trim_title(title)
+    tech = score_title(title, subject, family, pattern_id, existing_titles, existing_patterns)
+    ctr_score, ctr_reasons = score_ctr_title(title, keyword, subject, angle, tech.score)
+    total = int((tech.score * technical_weight) + (ctr_score * ctr_weight)) + base_adjustment
+    reasons = list(tech.reasons) + ctr_reasons + [source_reason, f"ctr-angle:{angle.ctr_angle}"]
+    out.append(CTRTitleCandidate(title, family, pattern_id, tech.score, ctr_score, total, reasons, angle))
+
+
+def generate_ctr_title_candidates(
+    keyword: str,
+    article_type: str = "",
+    classification: dict[str, Any] | None = None,
+    year: int | None = None,
+    existing_titles: list[str] | None = None,
+    existing_patterns: set[str] | None = None,
+) -> list[CTRTitleCandidate]:
     year = year or datetime.now().year
     intent = classify_title_intent(keyword, article_type, classification)
     ctx = title_context(keyword, year)
-    angle = classify_ctr_angle(keyword, intent.intent_family, str(ctx["kw"]))
+    subject = str(ctx["kw"])
+    angle = classify_ctr_angle(keyword, intent.intent_family, subject)
     candidates: list[CTRTitleCandidate] = []
+
+    for family, pattern_id, title in generate_fragment_variants(keyword, angle.ctr_angle, ctx, limit=64):
+        append_ctr_candidate(
+            candidates, title, family, pattern_id, keyword, subject, angle,
+            existing_titles, existing_patterns, "fragment-grammar", 0.22, 0.72, 4,
+        )
 
     for family in [*angle.preferred_families, "hidden_context", "practical_filter"]:
         for original_index, pattern in iter_rotated_patterns(keyword, family, CTR_TITLE_PATTERNS):
             pattern_id = f"ctr_{family}_{original_index + 1:02d}"
-            title = trim_title(pattern.format(**ctx))
-            tech = score_title(title, str(ctx["kw"]), family, pattern_id, existing_titles, existing_patterns)
-            ctr_score, ctr_reasons = score_ctr_title(title, keyword, str(ctx["kw"]), angle, tech.score)
-            total = int((tech.score * 0.30) + (ctr_score * 0.70))
-            reasons = list(tech.reasons) + ctr_reasons + [f"ctr-angle:{angle.ctr_angle}"]
-            candidates.append(CTRTitleCandidate(title, family, pattern_id, tech.score, ctr_score, total, reasons, angle))
+            title = pattern.format(**ctx)
+            append_ctr_candidate(
+                candidates, title, family, pattern_id, keyword, subject, angle,
+                existing_titles, existing_patterns, "fixed-ctr-template", 0.28, 0.66, 0,
+            )
 
-    # Safety fallback: include V2 technical candidates but score them harshly for CTR.
     for family in candidate_families(intent):
         for original_index, pattern in iter_rotated_patterns(keyword, family, TITLE_PATTERNS)[:3]:
             pattern_id = f"{family}_{original_index + 1:02d}"
-            title = trim_title(pattern.format(**ctx))
-            tech = score_title(title, str(ctx["kw"]), family, pattern_id, existing_titles, existing_patterns)
-            ctr_score, ctr_reasons = score_ctr_title(title, keyword, str(ctx["kw"]), angle, tech.score)
-            total = int((tech.score * 0.25) + (ctr_score * 0.55)) - 8
-            reasons = list(tech.reasons) + ctr_reasons + ["fallback-v2-pattern", f"ctr-angle:{angle.ctr_angle}"]
-            candidates.append(CTRTitleCandidate(title, family, pattern_id, tech.score, ctr_score, total, reasons, angle))
+            title = pattern.format(**ctx)
+            append_ctr_candidate(
+                candidates, title, family, pattern_id, keyword, subject, angle,
+                existing_titles, existing_patterns, "fallback-v2-pattern", 0.20, 0.48, -12,
+            )
 
     return sorted(candidates, key=lambda item: item.total_score, reverse=True)
 
