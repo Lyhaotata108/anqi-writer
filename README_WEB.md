@@ -15,7 +15,8 @@ blood
 3. 一键运行关键词聚类
 4. 一键生成主文章标题
 5. 一键生成正文蓝图
-6. 页面预览结果和下载 CSV
+6. 一键生成完整 Markdown 正文
+7. 页面预览结果和下载 CSV / Markdown
 
 ## 本地启动
 
@@ -24,7 +25,7 @@ cd /Users/hjg/Documents/anqicms-writer
 git fetch origin main
 git reset --hard origin/main
 python3 -m pip install -r requirements.txt
-streamlit run web_app.py
+python3 -m streamlit run web_app.py
 ```
 
 启动后浏览器会打开：
@@ -80,21 +81,29 @@ keyword_cluster_audit.csv
 primary_article_queue.csv
 title_intent_audit.csv
 body_blueprint_audit.csv
+article_publish_queue.csv
+articles/
 ```
+
+`articles/` 目录里是一篇文章一个 Markdown 文件，可以预览、下载，也可以作为 CMS 导入源。
 
 ## 页面功能
 
 - 多分类同时运行：Weight Loss / CBD / Blood
 - 每个分类单独上传关键词
-- 每个分类单独生成聚类、标题、正文蓝图
+- 每个分类单独生成聚类、标题、正文蓝图、完整 Markdown 正文
 - 多分类运行汇总表
 - 查看关键词聚类结果
 - 查看主文章队列
 - 查看标题审计表
 - 查看正文蓝图
+- 查看完整正文发布队列
+- 预览 Markdown 正文
 - 查看标题结构分布
 - 查看正文模板分布
+- 查看正文质量状态
 - 下载每一步 CSV
+- 下载单篇 Markdown
 
 ## 推荐流程
 
@@ -102,7 +111,9 @@ body_blueprint_audit.csv
 
 再看 `title_intent_audit.csv`，确认标题是否符合点击风格。
 
-最后看 `body_blueprint_audit.csv`，确认正文模板、H2、目标字数、FAQ 关键词是否合理。
+然后看 `body_blueprint_audit.csv`，确认正文模板、H2、目标字数、FAQ 关键词是否合理。
+
+最后看 `article_publish_queue.csv` 和 `articles/` 里的 Markdown 正文。`quality_status = PASS` 表示基础结构检查通过；医疗、CBD、Blood 类内容发布前仍建议人工快速扫一遍。
 
 ## 命令行备用方式
 
@@ -112,6 +123,7 @@ Weight Loss：
 python3 scripts/keyword_cluster_engine.py data/title_intent_seed_keywords.txt --category weight_loss --audit-output output/keyword_cluster_audit_v1.csv --queue-output output/primary_article_queue_v1.csv
 python3 scripts/title_intent_audit.py output/primary_article_queue_v1.csv --category weight_loss --output output/title_intent_audit_v38.csv
 python3 scripts/body_blueprint_engine.py output/title_intent_audit_v38.csv --output output/body_blueprint_audit_v2.csv
+python3 scripts/body_writer_engine.py output/body_blueprint_audit_v2.csv --articles-dir output/articles/weight_loss --queue-output output/article_publish_queue_weight_loss.csv
 ```
 
 CBD：
@@ -120,6 +132,7 @@ CBD：
 python3 scripts/keyword_cluster_engine.py data/cbd_keywords.txt --category cbd --audit-output output/cbd_cluster_audit.csv --queue-output output/cbd_primary_queue.csv
 python3 scripts/title_intent_audit.py output/cbd_primary_queue.csv --category cbd --output output/cbd_title_audit.csv
 python3 scripts/body_blueprint_engine.py output/cbd_title_audit.csv --output output/cbd_body_blueprint.csv
+python3 scripts/body_writer_engine.py output/cbd_body_blueprint.csv --articles-dir output/articles/cbd --queue-output output/article_publish_queue_cbd.csv
 ```
 
 Blood：
@@ -128,4 +141,5 @@ Blood：
 python3 scripts/keyword_cluster_engine.py data/blood_keywords.txt --category blood --audit-output output/blood_cluster_audit.csv --queue-output output/blood_primary_queue.csv
 python3 scripts/title_intent_audit.py output/blood_primary_queue.csv --category blood --output output/blood_title_audit.csv
 python3 scripts/body_blueprint_engine.py output/blood_title_audit.csv --output output/blood_body_blueprint.csv
+python3 scripts/body_writer_engine.py output/blood_body_blueprint.csv --articles-dir output/articles/blood --queue-output output/article_publish_queue_blood.csv
 ```
