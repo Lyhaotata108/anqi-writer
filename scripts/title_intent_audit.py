@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Audit title intent classification over a keyword seed file.
-
-Usage:
-    python3 scripts/title_intent_audit.py data/title_intent_seed_keywords.txt
-"""
+"""Audit title intent classification over a keyword seed file."""
 
 from __future__ import annotations
-
 from dataclasses import asdict
 from pathlib import Path
 import argparse
@@ -17,10 +12,8 @@ import sys
 from title_engine import generate_title_metadata
 from title_intent_classifier import classify_title_intent
 
-
 def read_keywords(path: Path) -> list[str]:
     return [line.strip() for line in path.read_text(encoding="utf-8", errors="ignore").splitlines() if line.strip()]
-
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Classify keyword title intents and preview generated titles.")
@@ -34,17 +27,27 @@ def main() -> int:
         return 2
 
     rows = []
-    used_titles: list[str] = []
-    used_patterns: set[str] = set()
+    used_titles = []
+    used_patterns = set()
+    seen_clusters = {}
     for keyword in read_keywords(input_path):
         intent = classify_title_intent(keyword)
         meta = generate_title_metadata(keyword, classification=asdict(intent), existing_titles=used_titles, existing_patterns=used_patterns)
+        cluster_key = meta.get("cluster_key")
+        cluster_first_keyword = seen_clusters.get(cluster_key, "")
+        cluster_status = "primary" if not cluster_first_keyword else "duplicate"
+        if not cluster_first_keyword:
+            seen_clusters[cluster_key] = keyword
+
         used_titles.append(meta["title"])
         used_patterns.add(meta["pattern"])
         rows.append({
             "keyword": keyword,
             "canonical_subject": meta.get("subject"),
             "canonical_question": meta.get("question"),
+            "cluster_key": cluster_key,
+            "cluster_status": cluster_status,
+            "cluster_first_keyword": cluster_first_keyword,
             "intent_family": intent.intent_family,
             "entity_type": intent.entity_type,
             "modifier": intent.modifier,
@@ -58,15 +61,20 @@ def main() -> int:
 
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
-    fields = ["keyword", "canonical_subject", "canonical_question", "intent_family", "entity_type", "modifier", "page_type", "title_family", "pattern_id", "title_score", "title", "reason"]
+    fields = [
+        "keyword", "canonical_subject", "canonical_question", "cluster_key", "cluster_status",
+        "cluster_first_keyword", "intent_family", "entity_type", "modifier", "page_type",
+        "title_family", "pattern_id", "title_score", "title", "reason",
+    ]
     with out.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
 
+    duplicate_count = sum(1 for row in rows if row["cluster_status"] == "duplicate")
     print(f"Wrote {len(rows)} rows to {out}")
+    print(f"Clusters: {len(seen_clusters)} primary · {duplicate_count} duplicate")
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())
