@@ -21,6 +21,12 @@ def normalize_spaces(text: str) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip()
 
 
+TWO_WORD_INTENT_TOKENS = {
+    "benefit", "benefits", "side-effects", "side", "effects", "dosage", "dose", "cost", "price",
+    "reviews", "review", "results", "safety", "safe", "uses", "use", "symptoms", "risks",
+}
+
+
 def clean_keyword(raw_keyword: str) -> KeywordCleanResult:
     raw = normalize_spaces(raw_keyword)
     cleaned = raw.lower().replace("’", "'")
@@ -29,8 +35,12 @@ def clean_keyword(raw_keyword: str) -> KeywordCleanResult:
     if not cleaned:
         return KeywordCleanResult(raw, cleaned, "skip", "empty keyword")
 
-    if len(cleaned.split()) < 3:
+    words = cleaned.split()
+    if len(words) < 2:
         return KeywordCleanResult(raw, cleaned, "low_quality", "too short to infer a useful search intent")
+
+    if len(words) == 2 and not (words[1] in TWO_WORD_INTENT_TOKENS or words[0] in {"best", "top"}):
+        return KeywordCleanResult(raw, cleaned, "needs_review", "two-word keyword needs review unless it contains a clear intent token")
 
     if re.search(r"^\d+\s+(lemon|juice|water|tea|coffee|drops|pill|pills|capsule|capsules)\b", cleaned):
         if "100 lemon" in cleaned or "100 juice" in cleaned:
