@@ -41,6 +41,10 @@ def safe_run_name(name: str) -> str:
     return "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(name or "")).strip("_") or "seo_run"
 
 
+def widget_key(prefix: str, *parts: object) -> str:
+    return prefix + "_" + safe_run_name("__".join(str(part) for part in parts))
+
+
 def local_config() -> dict[str, str]:
     for path in [ROOT / "local_api_keys.json", ROOT / "scripts" / "local_api_keys.json"]:
         if path.exists():
@@ -198,7 +202,14 @@ def run_cms_import(paths: dict[str, Path], settings: dict[str, int | bool]) -> t
 
 def csv_download(path: Path, label: str) -> None:
     if path.exists():
-        st.download_button(label, path.read_bytes(), file_name=path.name, mime="text/csv", use_container_width=True)
+        st.download_button(
+            label,
+            path.read_bytes(),
+            file_name=path.name,
+            mime="text/csv",
+            use_container_width=True,
+            key=widget_key("download_csv", path),
+        )
 
 
 def show_table(title: str, path: Path, cols: list[str] | None = None) -> None:
@@ -248,7 +259,7 @@ def show_article_preview(paths: dict[str, Path]) -> None:
     cols = [c for c in ["keyword", "title", "word_count", "api_model", "generation_status", "youtube_results_count", "quality_status", "publish_ready", "markdown_path", "preview_html_path"] if c in publish.columns]
     st.dataframe(publish[cols], use_container_width=True, height=300)
     article_options = publish["markdown_path"].astype(str).tolist()
-    selected = st.selectbox("选择文章", article_options)
+    selected = st.selectbox("选择文章", article_options, key=widget_key("article_select", paths["run_dir"]))
     md_path = Path(selected)
     row = publish[publish["markdown_path"].astype(str) == selected].iloc[0].to_dict()
     html_path = Path(str(row.get("preview_html_path", "")))
@@ -257,14 +268,28 @@ def show_article_preview(paths: dict[str, Path]) -> None:
     with preview_tab:
         if html_path.exists():
             html_text = html_path.read_text(encoding="utf-8", errors="ignore")
-            st.download_button("下载当前 HTML 预览", html_text.encode("utf-8"), file_name=html_path.name, mime="text/html", use_container_width=True)
+            st.download_button(
+                "下载当前 HTML 预览",
+                html_text.encode("utf-8"),
+                file_name=html_path.name,
+                mime="text/html",
+                use_container_width=True,
+                key=widget_key("download_html", html_path),
+            )
             components.html(html_text, height=900, scrolling=True)
         else:
             st.warning("没有找到 HTML 预览文件。请用最新版本重新生成文章。")
     with markdown_tab:
         if md_path.exists():
             text = md_path.read_text(encoding="utf-8", errors="ignore")
-            st.download_button("下载当前 Markdown", text.encode("utf-8"), file_name=md_path.name, mime="text/markdown", use_container_width=True)
+            st.download_button(
+                "下载当前 Markdown",
+                text.encode("utf-8"),
+                file_name=md_path.name,
+                mime="text/markdown",
+                use_container_width=True,
+                key=widget_key("download_markdown", md_path),
+            )
             st.markdown(text[:30000])
         else:
             st.warning("没有找到 Markdown 文件。")
