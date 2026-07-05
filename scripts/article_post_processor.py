@@ -5,10 +5,12 @@
 Post-processing goals:
 - Add a stable H2 Table of Contents near the top of the article.
 - Remove duplicate Last updated lines and noisy horizontal separators.
+- Clean awkward generated title suffixes.
 - Convert AI-only XML-ish blocks such as <Sequence>/<Step> to Markdown.
 - Convert fenced ASCII boxes/diagrams into normal Markdown bullets or quotes.
 - Remove CMS-unfriendly LaTeX fragments.
-- Ensure a final ## Important Note section exists.
+- Consolidate all medical disclaimers into one final ## Important Note section.
+- Add a lightweight ## References section for health/medication articles.
 - Keep image-placeholder.png for CMS image replacement.
 - Preserve real YouTube embeds when present.
 """
@@ -19,6 +21,7 @@ import html
 import re
 
 YOUTUBE_RE = re.compile(r"youtube\.com/(?:embed/|watch\?v=|shorts/)|youtu\.be/", re.I)
+BR_TOKEN = "__HTML_BR_TOKEN__"
 
 
 def normalize(text: str) -> str:
@@ -46,6 +49,49 @@ def extract_front_matter_value(front_matter: str, key: str) -> str:
     return normalize(match.group(1)) if match else ""
 
 
+def clean_title_text(title: str) -> str:
+    out = normalize(title)
+    bad_suffixes = [
+        " — After the First Try",
+        " - After the First Try",
+        ": After the First Try",
+        " — After Your First Try",
+        " - After Your First Try",
+    ]
+    for suffix in bad_suffixes:
+        if out.endswith(suffix):
+            out = out[: -len(suffix)].strip()
+    out = re.sub(r"\s+—\s+After the First Try\b", "", out)
+    return out
+
+
+def clean_title_artifacts(front: str, body: str) -> tuple[str, str, bool]:
+    changed = False
+
+    def replace_title_line(match: re.Match[str]) -> str:
+        nonlocal changed
+        key = match.group(1)
+        quote = match.group(2) or ""
+        value = match.group(3)
+        cleaned = clean_title_text(value)
+        if cleaned != value:
+            changed = True
+        return f"{key}: {quote}{cleaned}{quote}"
+
+    front2 = re.sub(r"^(title)\s*:\s*([\"']?)(.*?)(?:\2)\s*$", replace_title_line, front, flags=re.M)
+
+    def replace_h1(match: re.Match[str]) -> str:
+        nonlocal changed
+        value = match.group(1).strip()
+        cleaned = clean_title_text(value)
+        if cleaned != value:
+            changed = True
+        return f"# {cleaned}"
+
+    body2 = re.sub(r"^#\s+(.+?)\s*$", replace_h1, body, count=1, flags=re.M)
+    return front2, body2, changed
+
+
 def remove_duplicate_last_updated(body: str) -> str:
     lines = body.splitlines()
     seen = False
@@ -63,8 +109,6 @@ def remove_duplicate_last_updated(body: str) -> str:
 
 
 def remove_horizontal_separators(body: str) -> str:
-    # Gemini often inserts --- after every section. It looks noisy in CMS previews,
-    # so remove body-only separators while leaving YAML front matter untouched.
     lines = [line for line in body.splitlines() if line.strip() not in {"---", "***", "___"}]
     return "\n".join(lines)
 
@@ -197,7 +241,8 @@ def fix_common_typos(body: str) -> str:
         "cellular cellular voltage": "cellular voltage",
         "an completely separate": "a completely separate",
         "as a effortless": "as an effortless",
-        "Internet": "internet",
+        "ly, underlying systemic issues": "Underlying systemic issues",
+        "internet algorithms": "Internet algorithms",
     }
     out = body
     for wrong, right in fixes.items():
@@ -238,8 +283,6 @@ def insert_toc(body: str) -> str:
     toc = build_toc(body)
     if not toc:
         return body
-    # Always place the TOC before the first H2, so it appears after the intro,
-    # even if Gemini started with a different H2 before The Short Version.
     match = re.search(r"^##\s+", body, flags=re.M)
     if match:
         return body[: match.start()].rstrip() + "\n\n" + toc + "\n\n" + body[match.start():].lstrip()
@@ -260,22 +303,116 @@ def default_disclaimer(category: str) -> str:
     )
 
 
+def remove_blockquote_important_notes(body: str) -> tuple[str, list[str]]:
+    captured: list[str] = []
+    lines = body.splitlines()
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.lstrip().startswith(">") and re.search(r"Important Note|Medical Disclaimer", line, flags=re.I):
+            block: list[str] = []
+            while i < len(lines) and (lines[i].lstrip().startswith(">") or not lines[i].strip()):
+                block.append(lines[i])
+                i += 1
+                if i < len(lines) and not lines[i - 1].strip() and not lines[i].lstrip().startswith(">"):
+                    break
+            text = "\n".join(block)
+            text = re.sub(r"^>\s?", "", text, flags=re.M)
+            text = re.sub(r"^#{1,6}\s*", "", text, flags=re.M)
+            text = re.sub(r"\*\*(?:Important Note(?: and Medical Disclaimer)?|Medical Disclaimer)[:：]?\*\*", "", text, flags=re.I)
+            text = normalize(text)
+            if text:
+                captured.append(text)
+            continue
+        out.append(line)
+        i += 1
+    return "\n".join(out), captured
+
+
+def remove_inline_important_notes(body: str) -> tuple[str, list[str]]:
+    captured: list[str] = []
+    patterns = [
+        r"\*\*Important Note(?: and Medical Disclaimer)?[:：]\*\*\s*(.*?)(?=\n##\s+|\Z)",
+        r"\*Medical Disclaimer[:：]\s*(.*?)\*\s*(?=\n##\s+|\Z)",
+    ]
+    out = body
+    for pattern in patterns:
+        def repl(match: re.Match[str]) -> str:
+            text = normalize(match.group(1))
+            if text:
+                captured.append(text)
+            return "\n"
+        out = re.sub(pattern, repl, out, flags=re.I | re.S)
+    return out, captured
+
+
+def remove_h2_important_sections(body: str) -> tuple[str, list[str]]:
+    captured: list[str] = []
+    pattern = r"^##\s+Important Note\b.*?(?=^##\s+|\Z)"
+    def repl(match: re.Match[str]) -> str:
+        section = match.group(0)
+        content = re.sub(r"^##\s+Important Note\b.*\n?", "", section, flags=re.I)
+        content = normalize(content)
+        if content:
+            captured.append(content)
+        return "\n"
+    out = re.sub(pattern, repl, body, flags=re.I | re.M | re.S)
+    return out, captured
+
+
 def ensure_important_note(body: str, category: str) -> str:
     body = re.sub(r"^###\s+Important Note", "## Important Note", body, flags=re.I | re.M)
-    if re.search(r"^##\s+Important Note\b", body, flags=re.I | re.M):
-        return body
-    patterns = [
-        r"\*\*Important Note(?: and Medical Disclaimer)?[:：]\*\*\s*(.*)$",
-        r"\*Medical Disclaimer[:：]\s*(.*?)\*\s*$",
-        r">\s*\*\*Medical Disclaimer[:：]\*\*\s*(.*)$",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, body, flags=re.I | re.S)
-        if match:
-            note = normalize(match.group(1))
-            body = body[: match.start()].rstrip()
-            return body + "\n\n## Important Note\n\n" + (note or default_disclaimer(category))
-    return body.rstrip() + "\n\n## Important Note\n\n" + default_disclaimer(category)
+    body, block_notes = remove_blockquote_important_notes(body)
+    body, inline_notes = remove_inline_important_notes(body)
+    body, h2_notes = remove_h2_important_sections(body)
+    note_candidates = h2_notes + block_notes + inline_notes
+    note = next((item for item in note_candidates if len(item) > 40), "") or default_disclaimer(category)
+    return body.rstrip() + "\n\n## Important Note\n\n" + note
+
+
+def reference_items(category: str, body: str) -> list[str]:
+    text = body.lower()
+    refs: list[str] = []
+    if category in {"weight_loss", "blood", "cbd"}:
+        refs.append("FDA prescribing information, medication guides, or safety communications for any prescription medication discussed.")
+        refs.append("NIH, MedlinePlus, or other government health resources for background safety and condition information.")
+    if "metformin" in text:
+        refs.extend([
+            "FDA prescribing information for metformin products.",
+            "Diabetes Prevention Program and follow-up publications on metformin, diabetes risk, and weight change.",
+        ])
+    if "zepbound" in text or "tirzepatide" in text:
+        refs.extend([
+            "FDA prescribing information and medication guide for Zepbound (tirzepatide).",
+            "SURMOUNT clinical trial publications on tirzepatide and chronic weight management.",
+        ])
+    if "semaglutide" in text or "wegovy" in text or "ozempic" in text:
+        refs.extend([
+            "FDA prescribing information and medication guides for Wegovy/Ozempic where relevant.",
+            "STEP and OASIS clinical trial publications on semaglutide and weight management where relevant.",
+        ])
+    if "orlistat" in text or "alli" in text:
+        refs.append("FDA/MedlinePlus information for orlistat and Alli safety considerations.")
+    if "supplement" in text or "proprietary blend" in text or "cbd" in text:
+        refs.append("FDA consumer guidance on dietary supplements, product claims, and safety reporting.")
+    if not refs:
+        refs.append("Primary medical labels, clinical guidelines, and government health resources should be verified before publication.")
+    deduped: list[str] = []
+    seen = set()
+    for ref in refs:
+        key = ref.lower()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(ref)
+    return deduped[:8]
+
+
+def ensure_references(body: str, category: str) -> str:
+    body = re.sub(r"^##\s+References\b.*?(?=^##\s+|\Z)", "", body, flags=re.I | re.M | re.S).rstrip()
+    refs = reference_items(category, body)
+    lines = ["## References", ""] + [f"- {ref}" for ref in refs]
+    return body + "\n\n" + "\n".join(lines)
 
 
 def clean_blank_lines(body: str) -> str:
@@ -289,6 +426,10 @@ def post_process_markdown(markdown: str, category: str = "weight_loss") -> tuple
     front, body = split_front_matter(markdown)
     if not category:
         category = extract_front_matter_value(front, "category") or "weight_loss"
+
+    front, body, title_changed = clean_title_artifacts(front, body)
+    if title_changed:
+        notes.append("cleaned_title_artifacts")
 
     transforms = [
         ("deduped_last_updated", remove_duplicate_last_updated),
@@ -307,7 +448,12 @@ def post_process_markdown(markdown: str, category: str = "weight_loss") -> tuple
     before = body
     body = ensure_important_note(body, category)
     if body != before:
-        notes.append("ensured_important_note")
+        notes.append("consolidated_important_note")
+
+    before = body
+    body = ensure_references(body, category)
+    if body != before:
+        notes.append("ensured_references")
 
     before = body
     body = insert_toc(body)
@@ -319,7 +465,9 @@ def post_process_markdown(markdown: str, category: str = "weight_loss") -> tuple
 
 
 def inline_markdown(text: str) -> str:
-    out = html.escape(text)
+    safe = re.sub(r"<br\s*/?>", BR_TOKEN, str(text or ""), flags=re.I)
+    out = html.escape(safe)
+    out = out.replace(BR_TOKEN, "<br>")
     out = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", out)
     out = re.sub(r"\*(.+?)\*", r"<em>\1</em>", out)
     out = re.sub(r"`([^`]+)`", r"<code>\1</code>", out)
