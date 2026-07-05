@@ -5,12 +5,13 @@
 This importer follows the same contract as the legacy publish_articles.py:
 - Endpoint: https://manage.teiastyle.com/import/article
 - Token: query parameter ?token=...
+- Default token fallback: anqicms-import
 - JSON payload fields: title, content, keyword_id, category_id, keywords, description
 - Fixed category IDs: weight_loss=1, cbd=5, blood=9
 
 Safety:
-- Without --publish, this script only performs dry-run and does not need a token.
-- With --publish, token is required. It accepts both CMS_IMPORT_TOKEN and ANQICMS_IMPORT_TOKEN.
+- Without --publish, this script only performs dry-run.
+- With --publish, it uses --token, CMS_IMPORT_TOKEN, ANQICMS_IMPORT_TOKEN, or the default fallback token.
 - Use --only-publish-ready to import only rows marked publish_ready=yes and quality_status=PASS.
 """
 
@@ -28,6 +29,7 @@ from typing import Any
 
 DEFAULT_BASE_URL = "https://manage.teiastyle.com"
 DEFAULT_OUTPUT = "output/cms_import_results.csv"
+DEFAULT_IMPORT_TOKEN = "anqicms-import"
 
 CATEGORY_ID_MAP = {
     "weight_loss": 1,
@@ -57,7 +59,6 @@ def category_id_for_row(row: dict[str, str], override: int = 0) -> int | None:
     category = normalize_category(row.get("category", ""))
     if category in CATEGORY_ID_MAP:
         return CATEGORY_ID_MAP[category]
-    # Fallback from keyword/category-like content when older CSVs miss the category field.
     blob = normalize(" ".join([row.get("keyword", ""), row.get("title", ""), row.get("body_template", "")])).lower()
     if "cbd" in blob or "hemp" in blob:
         return CATEGORY_ID_MAP["cbd"]
@@ -248,9 +249,7 @@ def main() -> int:
     if not config and args.config == "local_api_keys.json":
         config = load_config("scripts/local_api_keys.json")
     base_url = first_value(args.base_url, ["CMS_IMPORT_BASE_URL", "ANQICMS_IMPORT_BASE_URL"], config, ["CMS_IMPORT_BASE_URL", "ANQICMS_IMPORT_BASE_URL"], DEFAULT_BASE_URL)
-    token = first_value(args.token, ["CMS_IMPORT_TOKEN", "ANQICMS_IMPORT_TOKEN"], config, ["CMS_IMPORT_TOKEN", "ANQICMS_IMPORT_TOKEN"])
-    if args.publish and not token:
-        raise SystemExit("Missing CMS token. Set CMS_IMPORT_TOKEN or ANQICMS_IMPORT_TOKEN in local_api_keys.json/env, or pass --token.")
+    token = first_value(args.token, ["CMS_IMPORT_TOKEN", "ANQICMS_IMPORT_TOKEN"], config, ["CMS_IMPORT_TOKEN", "ANQICMS_IMPORT_TOKEN"], DEFAULT_IMPORT_TOKEN)
 
     queue_rows = filter_rows(read_csv(Path(args.queue)), bool(args.only_publish_ready), int(args.max_articles or 0))
     article_url = import_url(base_url, token) if args.publish else ""
@@ -290,6 +289,7 @@ def main() -> int:
     write_csv(Path(args.output), results, ["title", "status", "cms_id", "message"])
     print(f"Selected rows: {len(queue_rows)}")
     print("Endpoint: /import/article")
+    print("Token source: --token / env / local config / default fallback")
     print("Payload fields: title, content, keyword_id/category_id, keywords, description")
     print("Category mapping: weight_loss=1, cbd=5, blood=9")
     print(f"Wrote CMS import results to {args.output}")
