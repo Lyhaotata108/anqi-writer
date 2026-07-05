@@ -153,7 +153,17 @@ def run_paths(run_name: str, category: str) -> dict[str, Path]:
     }
 
 
-def run_pipeline(keywords: list[str], run_name: str, category: str, use_ai: bool, use_youtube: bool, max_articles: int, overwrite: bool) -> tuple[dict[str, Path], list[tuple[str, bool, str]]]:
+def run_pipeline(
+    keywords: list[str],
+    run_name: str,
+    category: str,
+    use_ai: bool,
+    use_youtube: bool,
+    max_articles: int,
+    overwrite: bool,
+    cms_auto_import: bool = False,
+    cms_settings: dict[str, int | bool] | None = None,
+) -> tuple[dict[str, Path], list[tuple[str, bool, str]]]:
     paths = run_paths(run_name, category)
     paths["keyword_input"].write_text("\n".join(keywords) + "\n", encoding="utf-8")
     logs = []
@@ -170,15 +180,32 @@ def run_pipeline(keywords: list[str], run_name: str, category: str, use_ai: bool
             return paths, logs
 
     if use_ai:
-        cmd = [sys.executable, "scripts/ai_body_writer_engine.py", str(paths["body_blueprint"]), "--config", "local_api_keys.json", "--articles-dir", str(paths["articles_dir"]), "--queue-output", str(paths["publish_queue"])]
+        settings = cms_settings or {}
+        cmd = [
+            sys.executable, "scripts/ai_body_writer_engine.py", str(paths["body_blueprint"]),
+            "--config", "local_api_keys.json",
+            "--articles-dir", str(paths["articles_dir"]),
+            "--queue-output", str(paths["publish_queue"]),
+        ]
         if use_youtube:
             cmd.append("--use-youtube-context")
         if max_articles > 0:
             cmd.extend(["--max-articles", str(max_articles)])
         if overwrite:
             cmd.append("--overwrite")
+        if cms_auto_import:
+            cmd.extend(["--cms-import-after-each", "--cms-output", str(paths["cms_results"])])
+            if settings.get("publish"):
+                cmd.append("--cms-publish")
+            if settings.get("only_publish_ready"):
+                cmd.append("--cms-only-publish-ready")
+            if int(settings.get("category_id", 0) or 0) > 0:
+                cmd.extend(["--cms-category-id", str(int(settings.get("category_id", 0) or 0))])
         ok, output = run_command(cmd)
-        logs.append(("Gemini完整正文 + HTML预览", ok, output))
+        label = "Gemini完整正文 + HTML预览"
+        if cms_auto_import:
+            label += " + 单篇即时CMS导入"
+        logs.append((label, ok, output))
     else:
         ok, output = run_command([sys.executable, "scripts/body_writer_engine.py", str(paths["body_blueprint"]), "--articles-dir", str(paths["articles_dir"]), "--queue-output", str(paths["publish_queue"])])
         logs.append(("模板完整正文", ok, output))
@@ -304,7 +331,7 @@ model_name = cfg_value(config, ["GEMINI_MODEL", "OPENAI_MODEL"], "gemini-3-flash
 base_url = cfg_value(config, ["GEMINI_BASE_URL", "OPENAI_BASE_URL"], "")
 
 st.title("Anqi Writer SEO Pipeline")
-st.caption("支持 Weight Loss / CBD / Blood 同时跑：关键词聚类 → 标题 → 正文蓝图 → Gemini 正文 → Markdown + HTML 预览 → 可选 CMS 导入。")
+st.caption("支持 Weight Loss / CBD / Blood 同时跑：关键词聚类 → 标题 → 正文蓝图 → Gemini 正文 → Markdown + HTML 预览 → 可选单篇即时 CMS 导入。")
 
 with st.sidebar:
     st.header("运行设置")
@@ -323,12 +350,12 @@ with st.sidebar:
 
     st.divider()
     st.subheader("CMS 导入")
-    cms_auto_import = st.checkbox("生成后自动导入 CMS", value=False)
+    cms_auto_import = st.checkbox("生成一篇就导入一篇 CMS", value=False)
     cms_publish = st.checkbox("真正发布到 CMS（关闭则只 dry-run）", value=False, disabled=not cms_auto_import)
     cms_only_ready = st.checkbox("只导入 publish_ready = yes 的文章", value=True, disabled=not cms_auto_import)
-    cms_max_articles = st.number_input("CMS 每个分类最多导入几篇，0 = 全部", min_value=0, value=0, step=1, disabled=not cms_auto_import)
+    cms_max_articles = st.number_input("CMS 每个分类最多导入几篇，0 = 跟随生成数量", min_value=0, value=0, step=1, disabled=not cms_auto_import)
     cms_category_id = st.number_input("覆盖 category_id，0 = 使用固定映射", min_value=0, value=0, step=1, disabled=not cms_auto_import)
-    st.caption("固定映射：Weight Loss = 1，CBD = 5，Blood = 9。真实发布会使用导入脚本默认 token；如需覆盖，可在本地配置或环境变量里设置。")
+    st.caption("AI 模式下会生成第 1 篇 → 写入队列/预览 → 立即 dry-run/发布第 1 篇 → 再生成第 2 篇。固定映射：Weight Loss = 1，CBD = 5，Blood = 9。")
     if cms_auto_import and cms_publish:
         st.warning("已开启真实发布。建议先关闭此项 dry-run 测试。")
 
@@ -376,8 +403,14 @@ if start:
             all_ok = True
             for category, keywords in runnable.items():
                 st.markdown(f"#### {CATEGORY_LABELS[category]}")
-                paths, logs = run_pipeline(keywords, run_name, category, use_ai, use_youtube, int(max_articles), bool(overwrite))
-                if cms_auto_import:
+                category_max_articles = int(max_articles)
+                if cms_auto_import and int(cms_max_articles) > 0:
+                    category_max_articles = min(category_max_articles, int(cms_max_articles)) if category_max_articles > 0 else int(cms_max_articles)
+                paths, logs = run_pipeline(
+                    keywords, run_name, category, use_ai, use_youtube,
+                    category_max_articles, bool(overwrite), bool(cms_auto_import), cms_settings,
+                )
+                if cms_auto_import and not use_ai:
                     ok, output = run_cms_import(paths, cms_settings)
                     label = "CMS真实发布" if cms_publish else "CMS导入 dry-run"
                     logs.append((label, ok, output))
