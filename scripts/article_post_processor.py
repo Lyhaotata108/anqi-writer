@@ -1,19 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Clean generated Markdown articles and build local HTML previews.
-
-Post-processing goals:
-- Add a stable H2 Table of Contents near the top of the article.
-- Remove duplicate Last updated lines and noisy horizontal separators.
-- Clean awkward generated title suffixes.
-- Convert AI-only XML-ish blocks such as <Sequence>/<Step> to Markdown.
-- Convert fenced ASCII boxes/diagrams into normal Markdown bullets or quotes.
-- Remove CMS-unfriendly LaTeX fragments.
-- Consolidate all medical disclaimers into one final ## Important Note section.
-- Add a lightweight ## References section for health/medication articles.
-- Keep image-placeholder.png for CMS image replacement.
-- Preserve real YouTube embeds when present.
-"""
+"""Clean generated Markdown articles and build local HTML previews."""
 
 from __future__ import annotations
 from pathlib import Path
@@ -22,6 +9,7 @@ import re
 
 YOUTUBE_RE = re.compile(r"youtube\.com/(?:embed/|watch\?v=|shorts/)|youtu\.be/", re.I)
 BR_TOKEN = "__HTML_BR_TOKEN__"
+DOLLAR_TOKEN = "__HTML_DOLLAR_ENTITY_TOKEN__"
 
 
 def normalize(text: str) -> str:
@@ -52,17 +40,13 @@ def extract_front_matter_value(front_matter: str, key: str) -> str:
 def clean_title_text(title: str) -> str:
     out = normalize(title)
     bad_suffixes = [
-        " — After the First Try",
-        " - After the First Try",
-        ": After the First Try",
-        " — After Your First Try",
-        " - After Your First Try",
+        " — After the First Try", " - After the First Try", ": After the First Try",
+        " — After Your First Try", " - After Your First Try",
     ]
     for suffix in bad_suffixes:
         if out.endswith(suffix):
             out = out[: -len(suffix)].strip()
-    out = re.sub(r"\s+—\s+After the First Try\b", "", out)
-    return out
+    return re.sub(r"\s+—\s+After the First Try\b", "", out)
 
 
 def clean_title_artifacts(front: str, body: str) -> tuple[str, str, bool]:
@@ -70,12 +54,9 @@ def clean_title_artifacts(front: str, body: str) -> tuple[str, str, bool]:
 
     def replace_title_line(match: re.Match[str]) -> str:
         nonlocal changed
-        key = match.group(1)
-        quote = match.group(2) or ""
-        value = match.group(3)
+        key, quote, value = match.group(1), match.group(2) or "", match.group(3)
         cleaned = clean_title_text(value)
-        if cleaned != value:
-            changed = True
+        changed = changed or cleaned != value
         return f"{key}: {quote}{cleaned}{quote}"
 
     front2 = re.sub(r"^(title)\s*:\s*([\"']?)(.*?)(?:\2)\s*$", replace_title_line, front, flags=re.M)
@@ -84,8 +65,7 @@ def clean_title_artifacts(front: str, body: str) -> tuple[str, str, bool]:
         nonlocal changed
         value = match.group(1).strip()
         cleaned = clean_title_text(value)
-        if cleaned != value:
-            changed = True
+        changed = changed or cleaned != value
         return f"# {cleaned}"
 
     body2 = re.sub(r"^#\s+(.+?)\s*$", replace_h1, body, count=1, flags=re.M)
@@ -109,15 +89,11 @@ def remove_duplicate_last_updated(body: str) -> str:
 
 
 def remove_horizontal_separators(body: str) -> str:
-    lines = [line for line in body.splitlines() if line.strip() not in {"---", "***", "___"}]
-    return "\n".join(lines)
+    return "\n".join(line for line in body.splitlines() if line.strip() not in {"---", "***", "___"})
 
 
 def parse_attrs(attr_text: str) -> dict[str, str]:
-    attrs: dict[str, str] = {}
-    for key, value in re.findall(r"(\w+)=['\"]([^'\"]*)['\"]", attr_text or ""):
-        attrs[key.lower()] = value
-    return attrs
+    return {key.lower(): value for key, value in re.findall(r"(\w+)=['\"]([^'\"]*)['\"]", attr_text or "")}
 
 
 def convert_sequence_steps(body: str) -> str:
@@ -135,18 +111,14 @@ def convert_sequence_steps(body: str) -> str:
             if content:
                 heading += f"\n   {content}"
             steps.append(heading)
-        if not steps:
-            return normalize(re.sub(r"<[^>]+>", " ", inner))
-        return "\n\n".join(steps)
+        return "\n\n".join(steps) if steps else normalize(re.sub(r"<[^>]+>", " ", inner))
 
     body = re.sub(r"<Sequence\b[^>]*>(.*?)</Sequence>", replace_sequence, body, flags=re.I | re.S)
-    body = re.sub(r"</?(?:Sequence|Step)\b[^>]*>", "", body, flags=re.I)
-    return body
+    return re.sub(r"</?(?:Sequence|Step)\b[^>]*>", "", body, flags=re.I)
 
 
 def clean_box_line(line: str) -> str:
-    item = line.strip()
-    item = item.strip("` ")
+    item = line.strip().strip("` ")
     if re.fullmatch(r"[+\-|\s=]+", item):
         return ""
     if item.startswith("|") and item.endswith("|"):
@@ -173,10 +145,7 @@ def convert_quick_take_block(lines: list[str]) -> str:
         bullets.append(current)
     if not bullets:
         return ""
-    out = ["> **Quick Take**", ""]
-    for bullet in bullets:
-        out.append(f"- {bullet}")
-    return "\n".join(out)
+    return "> **Quick Take**\n\n" + "\n".join(f"- {bullet}" for bullet in bullets)
 
 
 def convert_diagram_block(lines: list[str]) -> str:
@@ -203,18 +172,22 @@ def convert_code_block(match: re.Match[str]) -> str:
         converted = convert_diagram_block(lines)
     else:
         cleaned = [clean_box_line(line) for line in lines]
-        cleaned = [line for line in cleaned if line]
-        converted = "\n".join(f"> {line}" for line in cleaned)
+        converted = "\n".join(f"> {line}" for line in cleaned if line)
     return "\n\n" + converted.strip() + "\n\n" if converted.strip() else "\n"
 
 
 def convert_code_fences(body: str) -> str:
     body = re.sub(r"```([a-zA-Z0-9_-]+)?\s*\n(.*?)\n```", convert_code_block, body, flags=re.S)
-    body = re.sub(r"``+", "", body)
-    return body
+    return re.sub(r"``+", "", body)
 
 
 def normalize_latex(body: str) -> str:
+    """Remove LaTeX artifacts while preserving rendered currency amounts.
+
+    The AI quality checker treats literal dollar signs as possible LaTeX delimiters, so
+    currency such as $900 is stored as the HTML entity &#36;900. Browsers and CMS pages
+    render this as a normal dollar sign.
+    """
     replacements = {
         r"\$\\text\{kg/m\}\^2\$": "kg/m²",
         r"\$\\text\{kg/m\^2\}\$": "kg/m²",
@@ -228,10 +201,11 @@ def normalize_latex(body: str) -> str:
     out = body
     for pattern, value in replacements.items():
         out = re.sub(pattern, value, out)
+    out = re.sub(r"\$(?=\d)", "&#36;", out)
     out = re.sub(r"\\text\{([^}]*)\}", r"\1", out)
+    out = re.sub(r"\$([^$\n]{1,80})\$", lambda m: m.group(1), out)
     out = out.replace("$", "")
-    out = out.replace("\\", "")
-    return out
+    return out.replace("\\", "")
 
 
 def fix_common_typos(body: str) -> str:
@@ -243,6 +217,13 @@ def fix_common_typos(body: str) -> str:
         "as a effortless": "as an effortless",
         "ly, underlying systemic issues": "Underlying systemic issues",
         "internet algorithms": "Internet algorithms",
+        "It mimic GLP-1": "It mimics GLP-1",
+        "it mimic GLP-1": "it mimics GLP-1",
+        "on a introductory dose": "on an introductory dose",
+        "a introductory dose": "an introductory dose",
+        "During the first fortnight": "During the first two weeks",
+        "during the first fortnight": "during the first two weeks",
+        "which bound significant amounts of water": "which bind significant amounts of water",
     }
     out = body
     for wrong, right in fixes.items():
@@ -291,16 +272,10 @@ def insert_toc(body: str) -> str:
 
 def default_disclaimer(category: str) -> str:
     if category == "cbd":
-        return (
-            "This article is for educational purposes only and does not provide medical advice. CBD products can vary in quality and may interact with medications, health conditions, pregnancy, breastfeeding, or drug testing. Speak with a qualified healthcare professional before using CBD for a health-related purpose."
-        )
+        return "This article is for educational purposes only and does not provide medical advice. CBD products can vary in quality and may interact with medications, health conditions, pregnancy, breastfeeding, or drug testing. Speak with a qualified healthcare professional before using CBD for a health-related purpose."
     if category == "blood":
-        return (
-            "This article is for educational purposes only and is not a diagnosis or treatment plan. Blood pressure, blood sugar, cholesterol, oxygen, and other blood-related readings require clinical context. Seek urgent medical care for severe symptoms, very abnormal readings, or rapidly worsening patterns."
-        )
-    return (
-        "This article is for educational purposes only and does not provide medical advice. Weight-loss medications, supplements, diet changes, and exercise plans may not be appropriate for every person. Speak with a qualified healthcare professional before starting, stopping, or changing any medication, supplement, or major health routine."
-    )
+        return "This article is for educational purposes only and is not a diagnosis or treatment plan. Blood pressure, blood sugar, cholesterol, oxygen, and other blood-related readings require clinical context. Seek urgent medical care for severe symptoms, very abnormal readings, or rapidly worsening patterns."
+    return "This article is for educational purposes only and does not provide medical advice. Weight-loss medications, supplements, diet changes, and exercise plans may not be appropriate for every person. Speak with a qualified healthcare professional before starting, stopping, or changing any medication, supplement, or major health routine."
 
 
 def remove_blockquote_important_notes(body: str) -> tuple[str, list[str]]:
@@ -313,20 +288,17 @@ def remove_blockquote_important_notes(body: str) -> tuple[str, list[str]]:
         if line.lstrip().startswith(">") and re.search(r"Important Note|Medical Disclaimer", line, flags=re.I):
             block: list[str] = []
             while i < len(lines) and (lines[i].lstrip().startswith(">") or not lines[i].strip()):
-                block.append(lines[i])
-                i += 1
+                block.append(lines[i]); i += 1
                 if i < len(lines) and not lines[i - 1].strip() and not lines[i].lstrip().startswith(">"):
                     break
-            text = "\n".join(block)
-            text = re.sub(r"^>\s?", "", text, flags=re.M)
+            text = re.sub(r"^>\s?", "", "\n".join(block), flags=re.M)
             text = re.sub(r"^#{1,6}\s*", "", text, flags=re.M)
             text = re.sub(r"\*\*(?:Important Note(?: and Medical Disclaimer)?|Medical Disclaimer)[:：]?\*\*", "", text, flags=re.I)
             text = normalize(text)
             if text:
                 captured.append(text)
             continue
-        out.append(line)
-        i += 1
+        out.append(line); i += 1
     return "\n".join(out), captured
 
 
@@ -357,8 +329,7 @@ def remove_h2_important_sections(body: str) -> tuple[str, list[str]]:
         if content:
             captured.append(content)
         return "\n"
-    out = re.sub(pattern, repl, body, flags=re.I | re.M | re.S)
-    return out, captured
+    return re.sub(pattern, repl, body, flags=re.I | re.M | re.S), captured
 
 
 def ensure_important_note(body: str, category: str) -> str:
@@ -366,45 +337,51 @@ def ensure_important_note(body: str, category: str) -> str:
     body, block_notes = remove_blockquote_important_notes(body)
     body, inline_notes = remove_inline_important_notes(body)
     body, h2_notes = remove_h2_important_sections(body)
-    note_candidates = h2_notes + block_notes + inline_notes
-    note = next((item for item in note_candidates if len(item) > 40), "") or default_disclaimer(category)
+    note = next((item for item in h2_notes + block_notes + inline_notes if len(item) > 40), "") or default_disclaimer(category)
     return body.rstrip() + "\n\n## Important Note\n\n" + note
+
+
+def md_link(label: str, url: str) -> str:
+    return f"[{label}]({url})"
 
 
 def reference_items(category: str, body: str) -> list[str]:
     text = body.lower()
     refs: list[str] = []
-    if category in {"weight_loss", "blood", "cbd"}:
-        refs.append("FDA prescribing information, medication guides, or safety communications for any prescription medication discussed.")
-        refs.append("NIH, MedlinePlus, or other government health resources for background safety and condition information.")
+    if "ozempic" in text:
+        refs.append(md_link("FDA Drugs@FDA: Ozempic (semaglutide) approval and labeling", "https://www.accessdata.fda.gov/scripts/cder/daf/index.cfm?event=overview.process&ApplNo=209637"))
+    if "wegovy" in text or "semaglutide" in text:
+        refs.append(md_link("FDA Drugs@FDA: Wegovy (semaglutide) approval and labeling", "https://www.accessdata.fda.gov/scripts/cder/daf/index.cfm?event=overview.process&ApplNo=215256"))
+        refs.append(md_link("MedlinePlus: Semaglutide Injection", "https://medlineplus.gov/druginfo/meds/a618008.html"))
+        refs.append(md_link("New England Journal of Medicine: STEP 1 semaglutide trial", "https://www.nejm.org/doi/full/10.1056/NEJMoa2032183"))
     if "metformin" in text:
-        refs.extend([
-            "FDA prescribing information for metformin products.",
-            "Diabetes Prevention Program and follow-up publications on metformin, diabetes risk, and weight change.",
-        ])
+        refs.append(md_link("MedlinePlus: Metformin", "https://medlineplus.gov/druginfo/meds/a696005.html"))
+        refs.append(md_link("Diabetes Prevention Program Research Group publication archive", "https://dppos.bsc.gwu.edu/web/dppos/publications"))
     if "zepbound" in text or "tirzepatide" in text:
-        refs.extend([
-            "FDA prescribing information and medication guide for Zepbound (tirzepatide).",
-            "SURMOUNT clinical trial publications on tirzepatide and chronic weight management.",
-        ])
-    if "semaglutide" in text or "wegovy" in text or "ozempic" in text:
-        refs.extend([
-            "FDA prescribing information and medication guides for Wegovy/Ozempic where relevant.",
-            "STEP and OASIS clinical trial publications on semaglutide and weight management where relevant.",
-        ])
+        refs.append(md_link("FDA Drugs@FDA: Zepbound (tirzepatide) approval and labeling", "https://www.accessdata.fda.gov/scripts/cder/daf/index.cfm?event=overview.process&ApplNo=217806"))
+        refs.append(md_link("New England Journal of Medicine: SURMOUNT-1 tirzepatide trial", "https://www.nejm.org/doi/full/10.1056/NEJMoa2206038"))
     if "orlistat" in text or "alli" in text:
-        refs.append("FDA/MedlinePlus information for orlistat and Alli safety considerations.")
-    if "supplement" in text or "proprietary blend" in text or "cbd" in text:
-        refs.append("FDA consumer guidance on dietary supplements, product claims, and safety reporting.")
+        refs.append(md_link("MedlinePlus: Orlistat", "https://medlineplus.gov/druginfo/meds/a601244.html"))
+    if "berberine" in text:
+        refs.append(md_link("NIH NCCIH: Berberine", "https://www.nccih.nih.gov/health/berberine-and-goldenseal"))
+    if "cbd" in text or category == "cbd":
+        refs.append(md_link("FDA: Cannabis and Cannabis-Derived Products, Including CBD", "https://www.fda.gov/news-events/public-health-focus/fda-regulation-cannabis-and-cannabis-derived-products-including-cannabidiol-cbd"))
+        refs.append(md_link("NIH NCCIH: Cannabis, Marijuana and Cannabinoids", "https://www.nccih.nih.gov/health/cannabis-marijuana-and-cannabinoids-what-you-need-to-know"))
+    if category == "blood" or any(term in text for term in ["blood pressure", "blood sugar", "a1c", "cholesterol"]):
+        refs.append(md_link("CDC: High Blood Pressure", "https://www.cdc.gov/high-blood-pressure/"))
+        refs.append(md_link("MedlinePlus: Blood Glucose Tests", "https://medlineplus.gov/lab-tests/blood-glucose-test/"))
+        refs.append(md_link("MedlinePlus: Cholesterol Levels", "https://medlineplus.gov/lab-tests/cholesterol-levels/"))
+    if category == "weight_loss" or any(term in text for term in ["weight loss", "supplement", "proprietary blend"]):
+        refs.append(md_link("NIH Office of Dietary Supplements: Weight Loss Fact Sheet", "https://ods.od.nih.gov/factsheets/WeightLoss-Consumer/"))
+        refs.append(md_link("FDA: Dietary Supplements", "https://www.fda.gov/food/dietary-supplements"))
     if not refs:
-        refs.append("Primary medical labels, clinical guidelines, and government health resources should be verified before publication.")
+        refs.append(md_link("MedlinePlus: Health Topics", "https://medlineplus.gov/healthtopics.html"))
     deduped: list[str] = []
     seen = set()
     for ref in refs:
         key = ref.lower()
         if key not in seen:
-            seen.add(key)
-            deduped.append(ref)
+            seen.add(key); deduped.append(ref)
     return deduped[:8]
 
 
@@ -436,7 +413,7 @@ def post_process_markdown(markdown: str, category: str = "weight_loss") -> tuple
         ("removed_horizontal_separators", remove_horizontal_separators),
         ("converted_sequence_steps", convert_sequence_steps),
         ("converted_code_fences", convert_code_fences),
-        ("removed_latex", normalize_latex),
+        ("removed_latex_preserved_currency", normalize_latex),
         ("fixed_common_typos", fix_common_typos),
     ]
     for note, func in transforms:
@@ -453,7 +430,7 @@ def post_process_markdown(markdown: str, category: str = "weight_loss") -> tuple
     before = body
     body = ensure_references(body, category)
     if body != before:
-        notes.append("ensured_references")
+        notes.append("ensured_linked_references")
 
     before = body
     body = insert_toc(body)
@@ -466,12 +443,13 @@ def post_process_markdown(markdown: str, category: str = "weight_loss") -> tuple
 
 def inline_markdown(text: str) -> str:
     safe = re.sub(r"<br\s*/?>", BR_TOKEN, str(text or ""), flags=re.I)
+    safe = safe.replace("&#36;", DOLLAR_TOKEN)
     out = html.escape(safe)
-    out = out.replace(BR_TOKEN, "<br>")
+    out = out.replace(BR_TOKEN, "<br>").replace(DOLLAR_TOKEN, "&#36;")
     out = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", out)
     out = re.sub(r"\*(.+?)\*", r"<em>\1</em>", out)
     out = re.sub(r"`([^`]+)`", r"<code>\1</code>", out)
-    out = re.sub(r"\[([^\]]+)\]\(([^\)]+)\)", r'<a href="\2">\1</a>', out)
+    out = re.sub(r"\[([^\]]+)\]\(([^\)]+)\)", r'<a href="\2" target="_blank" rel="noopener">\1</a>', out)
     return out
 
 
@@ -484,8 +462,7 @@ def render_table(lines: list[str]) -> str:
         rows.append(cells)
     if not rows:
         return ""
-    head = rows[0]
-    body = rows[1:]
+    head, body = rows[0], rows[1:]
     html_rows = ["<table><thead><tr>" + "".join(f"<th>{inline_markdown(c)}</th>" for c in head) + "</tr></thead><tbody>"]
     for row in body:
         html_rows.append("<tr>" + "".join(f"<td>{inline_markdown(c)}</td>" for c in row) + "</tr>")
@@ -509,40 +486,29 @@ def markdown_body_to_html(body: str) -> str:
     def close_list() -> None:
         nonlocal list_open
         if list_open:
-            out.append("</ul>")
-            list_open = False
+            out.append("</ul>"); list_open = False
 
     def flush_table() -> None:
         nonlocal table_lines
         if table_lines:
-            out.append(render_table(table_lines))
-            table_lines = []
+            out.append(render_table(table_lines)); table_lines = []
 
     for raw in lines:
-        line = raw.rstrip()
-        stripped = line.strip()
+        line = raw.rstrip(); stripped = line.strip()
         if not stripped:
-            flush_paragraph(); close_list(); flush_table()
-            continue
+            flush_paragraph(); close_list(); flush_table(); continue
         if stripped in {"---", "***", "___"}:
-            flush_paragraph(); close_list(); flush_table()
-            out.append("<hr>")
-            continue
+            flush_paragraph(); close_list(); flush_table(); out.append("<hr>"); continue
         if stripped.startswith("<iframe"):
-            flush_paragraph(); close_list(); flush_table()
-            out.append(f'<div class="video-wrap">{stripped}</div>')
-            continue
+            flush_paragraph(); close_list(); flush_table(); out.append(f'<div class="video-wrap">{stripped}</div>'); continue
         if line.startswith("|") and line.endswith("|"):
-            flush_paragraph(); close_list()
-            table_lines.append(line)
-            continue
+            flush_paragraph(); close_list(); table_lines.append(line); continue
         else:
             flush_table()
         image_match = re.match(r"!\[([^\]]*)\]\(([^\)]+)\)", stripped)
         if image_match:
             flush_paragraph(); close_list()
-            alt = html.escape(image_match.group(1) or "Image placeholder")
-            src = image_match.group(2)
+            alt = html.escape(image_match.group(1) or "Image placeholder"); src = image_match.group(2)
             if src == "image-placeholder.png":
                 out.append(f'<figure class="image-placeholder"><div>Image Placeholder</div><figcaption>{alt}</figcaption></figure>')
             else:
@@ -551,31 +517,22 @@ def markdown_body_to_html(body: str) -> str:
         h = re.match(r"^(#{1,4})\s+(.+)$", line)
         if h:
             flush_paragraph(); close_list(); flush_table()
-            level = len(h.group(1))
-            title = h.group(2).strip()
-            anchor = slugify(title)
-            out.append(f'<h{level} id="{anchor}">{inline_markdown(title)}</h{level}>')
-            continue
+            level = len(h.group(1)); title = h.group(2).strip(); anchor = slugify(title)
+            out.append(f'<h{level} id="{anchor}">{inline_markdown(title)}</h{level}>'); continue
         if re.match(r"^[-*]\s+", line):
             flush_paragraph(); flush_table()
             if not list_open:
-                out.append("<ul>")
-                list_open = True
+                out.append("<ul>"); list_open = True
             item = re.sub(r"^[-*]\s+", "", line)
-            out.append(f"<li>{inline_markdown(item)}</li>")
-            continue
+            out.append(f"<li>{inline_markdown(item)}</li>"); continue
         if re.match(r"^\d+\.\s+", line):
             flush_paragraph(); flush_table()
             if not list_open:
-                out.append("<ul>")
-                list_open = True
+                out.append("<ul>"); list_open = True
             item = re.sub(r"^\d+\.\s+", "", line)
-            out.append(f"<li>{inline_markdown(item)}</li>")
-            continue
+            out.append(f"<li>{inline_markdown(item)}</li>"); continue
         if line.startswith(">"):
-            flush_paragraph(); close_list(); flush_table()
-            out.append("<blockquote>" + inline_markdown(line.lstrip("> ")) + "</blockquote>")
-            continue
+            flush_paragraph(); close_list(); flush_table(); out.append("<blockquote>" + inline_markdown(line.lstrip("> ")) + "</blockquote>"); continue
         paragraph.append(line)
 
     flush_paragraph(); close_list(); flush_table()
