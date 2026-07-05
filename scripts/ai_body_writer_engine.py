@@ -2,15 +2,12 @@
 # -*- coding: utf-8 -*-
 """Generate CMS-ready Markdown articles from body blueprints with a Gemini/OpenAI-compatible API.
 
-Batch design:
-- One article = one API request.
-- Outputs are written immediately so interrupted runs can resume.
-- Existing Markdown files are skipped unless --overwrite is set.
-- Supports Gemini relay values: GEMINI_BASE_URL, GEMINI_API_KEY, GEMINI_MODEL.
-- Supports YouTube Data API snippets as optional audience/context input.
-- Enforces CMS placeholders:
-  - ![Image description](image-placeholder.png)
-  - <iframe width="795" height="448" frameborder="0" allowfullscreen src="youtube-url-placeholder"></iframe>
+Video rule:
+- If YouTube API returns a relevant video, write a real YouTube embed URL into the article iframe.
+- If no YouTube video is found, do not insert a video iframe. The CMS can fall back to its keyword-library video.
+
+Image rule:
+- Always keep the CMS image placeholder: ![Image description](image-placeholder.png)
 """
 
 from __future__ import annotations
@@ -29,7 +26,6 @@ from typing import Any
 
 DEFAULT_ARTICLES_DIR = "output/ai_articles"
 DEFAULT_QUEUE_OUTPUT = "output/ai_article_publish_queue.csv"
-CMS_VIDEO_IFRAME = '<iframe width="795" height="448" frameborder="0" allowfullscreen src="youtube-url-placeholder"></iframe>'
 
 
 def normalize(text: str) -> str:
@@ -112,7 +108,21 @@ def today_label() -> str:
     return datetime.now().strftime("%B %d, %Y").replace(" 0", " ")
 
 
-def front_matter(row: dict[str, str], slug: str, status: str, selected_youtube_url: str = "") -> str:
+def youtube_embed_url(video_id: str) -> str:
+    video_id = normalize(video_id)
+    return f"https://www.youtube.com/embed/{video_id}" if video_id else ""
+
+
+def youtube_watch_url(video_id: str) -> str:
+    video_id = normalize(video_id)
+    return f"https://www.youtube.com/watch?v={video_id}" if video_id else ""
+
+
+def youtube_iframe(src: str) -> str:
+    return f'<iframe width="795" height="448" frameborder="0" allowfullscreen src="{src}"></iframe>'
+
+
+def front_matter(row: dict[str, str], slug: str, status: str, selected_youtube_url: str = "", selected_youtube_embed_url: str = "") -> str:
     title = normalize(row.get("title") or row.get("keyword"))
     lines = [
         "---",
@@ -127,6 +137,8 @@ def front_matter(row: dict[str, str], slug: str, status: str, selected_youtube_u
     ]
     if selected_youtube_url:
         lines.append(f"selected_youtube_url: \"{selected_youtube_url}\"")
+    if selected_youtube_embed_url:
+        lines.append(f"selected_youtube_embed_url: \"{selected_youtube_embed_url}\"")
     lines.extend(["---", ""])
     return "\n".join(lines)
 
@@ -183,12 +195,15 @@ def youtube_search(api_key: str, query: str, max_results: int = 5) -> list[dict[
     for item in data.get("items", []):
         snippet = item.get("snippet", {})
         video_id = item.get("id", {}).get("videoId", "")
+        if not video_id:
+            continue
         results.append({
             "title": normalize(snippet.get("title", "")),
             "channel": normalize(snippet.get("channelTitle", "")),
             "description": normalize(snippet.get("description", ""))[:280],
             "video_id": video_id,
-            "url": f"https://www.youtube.com/watch?v={video_id}" if video_id else "",
+            "url": youtube_watch_url(video_id),
+            "embed_url": youtube_embed_url(video_id),
         })
     return results
 
@@ -246,9 +261,7 @@ Blueprint:
 
 CMS media requirements:
 - Include exactly one image placeholder in the article body using Markdown: ![Relevant description](image-placeholder.png)
-- Include exactly one YouTube iframe placeholder in the article body using this exact HTML:
-{CMS_VIDEO_IFRAME}
-- Do not replace image-placeholder.png or youtube-url-placeholder with a real URL. The CMS will replace them later.
+- Do not add any YouTube iframe yourself. The system will insert a real YouTube iframe only when a valid YouTube API result exists.
 
 Style requirements:
 - Start with a search-intent hook, not a dictionary definition.
@@ -308,13 +321,22 @@ def insert_after_intro(text: str, block: str) -> str:
     return "\n\n".join(parts)
 
 
-def ensure_cms_placeholders(text: str, title: str) -> str:
-    out = text
-    out = re.sub(r'src="https?://(?:www\.)?youtube\.com/[^"]+"', 'src="youtube-url-placeholder"', out, flags=re.I)
+def remove_placeholder_youtube(text: str) -> str:
+    out = re.sub(r"\n?## Related Video\s*\n\s*<iframe[^>]+youtube-url-placeholder[^>]*></iframe>\s*", "\n", text, flags=re.I)
+    out = re.sub(r"\n?<iframe[^>]+youtube-url-placeholder[^>]*></iframe>\s*", "\n", out, flags=re.I)
+    return re.sub(r"\n{3,}", "\n\n", out).strip()
+
+
+def has_youtube(text: str) -> bool:
+    return bool(re.search(r"youtube\.com/(?:embed/|watch\?v=)|youtu\.be/", text, flags=re.I))
+
+
+def ensure_cms_media(text: str, title: str, selected_embed_url: str = "") -> str:
+    out = remove_placeholder_youtube(text)
     if "image-placeholder.png" not in out:
         out = insert_after_intro(out, f"![{normalize(title)}](image-placeholder.png)")
-    if "youtube-url-placeholder" not in out:
-        video_block = "## Related Video\n\n" + CMS_VIDEO_IFRAME
+    if selected_embed_url and not has_youtube(out):
+        video_block = "## Related Video\n\n" + youtube_iframe(selected_embed_url)
         marker = "## Frequently Asked"
         idx = out.find(marker)
         if idx >= 0:
@@ -324,17 +346,17 @@ def ensure_cms_placeholders(text: str, title: str) -> str:
     return out
 
 
-def clean_markdown(markdown: str, row: dict[str, str], selected_youtube_url: str = "") -> str:
+def clean_markdown(markdown: str, row: dict[str, str], selected_youtube_url: str = "", selected_youtube_embed_url: str = "") -> str:
     text = strip_code_fence(markdown)
     title = normalize(row.get("title") or row.get("keyword"))
     if not re.search(r"^#\s+", text, flags=re.M):
         text = f"# {title}\n\nLast updated: {today_label()}\n\n" + text
     elif "Last updated:" not in text[:500]:
         text = re.sub(r"(^#\s+.*?$)", r"\1\n\nLast updated: " + today_label(), text, count=1, flags=re.M)
-    text = ensure_cms_placeholders(text, title)
+    text = ensure_cms_media(text, title, selected_youtube_embed_url)
     slug = slugify(row.get("keyword") or title)
     if not text.startswith("---"):
-        text = front_matter(row, slug, "draft_ready", selected_youtube_url) + text
+        text = front_matter(row, slug, "draft_ready", selected_youtube_url, selected_youtube_embed_url) + text
     return text.strip() + "\n"
 
 
@@ -352,7 +374,7 @@ def repeated_paragraph_count(markdown: str) -> int:
     return repeated
 
 
-def quality_check(markdown: str, row: dict[str, str]) -> tuple[str, bool, list[str]]:
+def quality_check(markdown: str, row: dict[str, str], selected_youtube_embed_url: str = "") -> tuple[str, bool, list[str]]:
     notes: list[str] = []
     wc = word_count(markdown)
     try:
@@ -363,9 +385,11 @@ def quality_check(markdown: str, row: dict[str, str]) -> tuple[str, bool, list[s
         notes.append(f"word_count_below_target:{wc}/{target}")
     if len(re.findall(r"^## ", markdown, flags=re.M)) < 5:
         notes.append("too_few_h2")
-    for required in ["The Short Version", "Frequently Asked", "Important Note", "image-placeholder.png", "youtube-url-placeholder"]:
+    for required in ["The Short Version", "Frequently Asked", "Important Note", "image-placeholder.png"]:
         if required not in markdown:
             notes.append(f"missing:{required}")
+    if selected_youtube_embed_url and selected_youtube_embed_url not in markdown:
+        notes.append("missing:selected_youtube_embed_url")
     if re.search(r"\b(guaranteed|miracle cure|cures?|detoxes?|burns fat instantly|clinically proven to cure)\b", markdown, flags=re.I):
         notes.append("unsafe_claim_language")
     if re.search(r"\b(this section should|open with|summarize what|blueprint|provided h2 plan)\b", markdown, flags=re.I):
@@ -427,6 +451,7 @@ def main() -> int:
         error_message = ""
         yt_results: list[dict[str, str]] = []
         selected_youtube_url = ""
+        selected_youtube_embed_url = ""
 
         if path.exists() and not args.overwrite:
             markdown = path.read_text(encoding="utf-8", errors="ignore")
@@ -440,8 +465,9 @@ def main() -> int:
                     yt_results = youtube_search(youtube_api_key, query, args.youtube_max_results)
                     youtube_context = youtube_context_text(yt_results)
                     selected_youtube_url = yt_results[0].get("url", "") if yt_results else ""
+                    selected_youtube_embed_url = yt_results[0].get("embed_url", "") if yt_results else ""
                 raw = call_chat_completion(api_key, api_base, model, row, args.temperature, args.timeout, youtube_context)
-                markdown = clean_markdown(raw, row, selected_youtube_url)
+                markdown = clean_markdown(raw, row, selected_youtube_url, selected_youtube_embed_url)
                 path.write_text(markdown, encoding="utf-8")
                 time.sleep(args.sleep)
             except Exception as exc:  # noqa: BLE001
@@ -450,7 +476,7 @@ def main() -> int:
                 error_message = str(exc)[:1200]
 
         if markdown:
-            quality_status, publish_ready, notes = quality_check(markdown, row)
+            quality_status, publish_ready, notes = quality_check(markdown, row, selected_youtube_embed_url)
             wc = word_count(markdown)
         else:
             quality_status, publish_ready, notes, wc = "ERROR", False, [error_message], 0
@@ -468,12 +494,13 @@ def main() -> int:
             "generation_status": generation_status,
             "youtube_results_count": len(yt_results),
             "selected_youtube_url": selected_youtube_url,
+            "selected_youtube_embed_url": selected_youtube_embed_url,
             "quality_status": quality_status,
             "publish_ready": "yes" if publish_ready else "review",
             "quality_notes": " | ".join(notes),
         })
 
-    fields = ["category", "keyword", "title", "slug", "markdown_path", "word_count", "target_word_count", "body_template", "api_model", "generation_status", "youtube_results_count", "selected_youtube_url", "quality_status", "publish_ready", "quality_notes"]
+    fields = ["category", "keyword", "title", "slug", "markdown_path", "word_count", "target_word_count", "body_template", "api_model", "generation_status", "youtube_results_count", "selected_youtube_url", "selected_youtube_embed_url", "quality_status", "publish_ready", "quality_notes"]
     write_csv(Path(args.queue_output), queue_rows, fields)
     pass_count = sum(1 for row in queue_rows if row["quality_status"] == "PASS")
     errors = sum(1 for row in queue_rows if row["quality_status"] == "ERROR")
