@@ -13,6 +13,9 @@ Safety:
 - Without --publish, this script only performs dry-run.
 - With --publish, it uses --token, CMS_IMPORT_TOKEN, ANQICMS_IMPORT_TOKEN, or the default fallback token.
 - Use --only-publish-ready to import only rows marked publish_ready=yes and quality_status=PASS.
+
+Network compatibility:
+- POST requests include browser-like headers to avoid simple WAF/Cloudflare blocks that reject Python's default urllib user agent.
 """
 
 from __future__ import annotations
@@ -30,6 +33,11 @@ from typing import Any
 DEFAULT_BASE_URL = "https://manage.teiastyle.com"
 DEFAULT_OUTPUT = "output/cms_import_results.csv"
 DEFAULT_IMPORT_TOKEN = "anqicms-import"
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
 
 CATEGORY_ID_MAP = {
     "weight_loss": 1,
@@ -115,9 +123,30 @@ def import_url(base_url: str, token: str) -> str:
     return f"{base}/import/article?{query}"
 
 
+def browser_headers(url: str) -> dict[str, str]:
+    parsed = urllib.parse.urlparse(url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    user_agent = os.getenv("ANQICMS_USER_AGENT", "") or os.getenv("CMS_IMPORT_USER_AGENT", "") or DEFAULT_USER_AGENT
+    referer = os.getenv("ANQICMS_REFERER", "") or os.getenv("CMS_IMPORT_REFERER", "") or f"{origin}/"
+    return {
+        "Content-Type": "application/json; charset=utf-8",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Origin": origin,
+        "Referer": referer,
+        "User-Agent": user_agent,
+        "X-Requested-With": "XMLHttpRequest",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+    }
+
+
 def post_json(url: str, payload: dict[str, Any], timeout: int = 90) -> dict[str, Any]:
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(url, data=data, method="POST", headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(url, data=data, method="POST", headers=browser_headers(url))
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
@@ -232,6 +261,14 @@ def build_payload(row: dict[str, str], category_override: int = 0) -> tuple[dict
     return payload, content
 
 
+def cms_error_message(exc: urllib.error.HTTPError) -> str:
+    body = exc.read().decode("utf-8", errors="ignore")
+    message = f"HTTP {exc.code}: {body[:500]}"
+    if exc.code == 403 and "1010" in body:
+        message += " | blocked_by_waf_or_cloudflare_1010: request reached the domain but was blocked before AnQiCMS handled it. Whitelist /import/article POST or disable the related WAF rule if this still appears after browser headers."
+    return message
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Publish article Markdown files to AnQiCMS import API.")
     parser.add_argument("queue", help="article_publish_queue.csv")
@@ -281,8 +318,7 @@ def main() -> int:
             results.append({"title": title, "status": "success" if ok else "error", "cms_id": cms_id, "message": response.get("msg", json.dumps(response, ensure_ascii=False))})
             print(f"[{idx}/{len(queue_rows)}] {'OK' if ok else 'ERROR'} {title}")
         except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="ignore")
-            results.append({"title": title, "status": "error", "cms_id": "", "message": f"HTTP {exc.code}: {body[:500]}"})
+            results.append({"title": title, "status": "error", "cms_id": "", "message": cms_error_message(exc)})
         except Exception as exc:  # noqa: BLE001
             results.append({"title": title, "status": "error", "cms_id": "", "message": str(exc)[:500]})
 
@@ -290,6 +326,7 @@ def main() -> int:
     print(f"Selected rows: {len(queue_rows)}")
     print("Endpoint: /import/article")
     print("Token source: --token / env / local config / default fallback")
+    print("Headers: browser-like User-Agent, Origin, Referer, Accept, X-Requested-With")
     print("Payload fields: title, content, keyword_id/category_id, keywords, description")
     print("Category mapping: weight_loss=1, cbd=5, blood=9")
     print(f"Wrote CMS import results to {args.output}")
