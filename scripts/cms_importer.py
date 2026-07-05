@@ -1,22 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Publish generated Markdown articles to the CMS import API.
+"""Publish generated Markdown articles to the AnQiCMS import API.
 
-Video rule:
-- Preserve a real YouTube iframe/link if the article already has one.
-- If queue row has selected_youtube_embed_url, insert that real iframe.
-- If no real YouTube URL exists, do not insert a placeholder. The CMS can fall back to its keyword-library video.
+This importer follows the same contract as the legacy publish_articles.py:
+- Endpoint: https://manage.teiastyle.com/import/article
+- Token: query parameter ?token=...
+- JSON payload fields: title, content, keyword_id, category_id, keywords, description
+- Fixed category IDs: weight_loss=1, cbd=5, blood=9
 
-Image rule:
-- Ensure image-placeholder.png exists so the CMS can replace it later.
-
-Category rule:
-- Use fixed CMS category IDs by default: weight_loss=1, cbd=5, blood=9.
-- --category-id can still override the default mapping when needed.
-
-Safety rule:
+Safety:
+- Without --publish, this script only performs dry-run and does not need a token.
+- With --publish, token is required. It accepts both CMS_IMPORT_TOKEN and ANQICMS_IMPORT_TOKEN.
 - Use --only-publish-ready to import only rows marked publish_ready=yes and quality_status=PASS.
-- Without --publish, the script performs dry-run only and will not POST to CMS. Dry-run does not require CMS_IMPORT_TOKEN.
 """
 
 from __future__ import annotations
@@ -40,12 +35,6 @@ CATEGORY_ID_MAP = {
     "blood": 9,
 }
 
-CATEGORY_HINTS = {
-    "weight_loss": ["keto", "减肥", "减肥药", "weight", "weight loss"],
-    "cbd": ["cbd"],
-    "blood": ["blood", "血", "血压", "血糖", "cholesterol", "pressure", "glucose"],
-}
-
 
 def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip()
@@ -53,13 +42,30 @@ def normalize(text: str) -> str:
 
 def normalize_category(category: str) -> str:
     raw = normalize(category).lower().replace("-", "_").replace(" ", "_")
-    if raw in {"weight", "weightloss", "weight_loss", "减肥", "减肥药"}:
+    if raw in {"weight", "weightloss", "weight_loss", "weight_loss_articles", "减肥", "减肥药"}:
         return "weight_loss"
-    if raw in {"cbd", "hemp"}:
+    if raw in {"cbd", "hemp", "cbd_articles"}:
         return "cbd"
-    if raw in {"blood", "blood_health", "blood_sugar", "blood_pressure", "血", "血糖", "血压"}:
+    if raw in {"blood", "blood_health", "blood_sugar", "blood_pressure", "blood_articles", "血", "血糖", "血压"}:
         return "blood"
     return raw
+
+
+def category_id_for_row(row: dict[str, str], override: int = 0) -> int | None:
+    if override and override > 0:
+        return int(override)
+    category = normalize_category(row.get("category", ""))
+    if category in CATEGORY_ID_MAP:
+        return CATEGORY_ID_MAP[category]
+    # Fallback from keyword/category-like content when older CSVs miss the category field.
+    blob = normalize(" ".join([row.get("keyword", ""), row.get("title", ""), row.get("body_template", "")])).lower()
+    if "cbd" in blob or "hemp" in blob:
+        return CATEGORY_ID_MAP["cbd"]
+    if any(term in blob for term in ["blood", "a1c", "cholesterol", "glucose", "pressure", "血糖", "血压"]):
+        return CATEGORY_ID_MAP["blood"]
+    if any(term in blob for term in ["weight", "ozempic", "wegovy", "zepbound", "metformin", "berberine", "减肥"]):
+        return CATEGORY_ID_MAP["weight_loss"]
+    return None
 
 
 def read_csv(path: Path) -> list[dict[str, str]]:
@@ -88,20 +94,24 @@ def load_config(path: str | Path) -> dict[str, str]:
     return {str(k): str(v) for k, v in data.items() if v is not None}
 
 
-def cfg(cli_value: str, env_name: str, config: dict[str, str], config_name: str, default: str = "") -> str:
-    return cli_value or os.getenv(env_name, "") or config.get(config_name, "") or default
+def first_value(cli_value: str, env_names: list[str], config: dict[str, str], config_names: list[str], default: str = "") -> str:
+    if cli_value:
+        return cli_value
+    for name in env_names:
+        value = os.getenv(name, "")
+        if value:
+            return value
+    for name in config_names:
+        value = config.get(name, "")
+        if value and not value.startswith("paste-your-"):
+            return value
+    return default
 
 
-def url_join(base_url: str, path: str, token: str) -> str:
+def import_url(base_url: str, token: str) -> str:
     base = base_url.rstrip("/")
     query = urllib.parse.urlencode({"token": token})
-    return f"{base}{path}?{query}"
-
-
-def get_json(url: str, timeout: int = 60) -> dict[str, Any]:
-    req = urllib.request.Request(url, method="GET")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    return f"{base}/import/article?{query}"
 
 
 def post_json(url: str, payload: dict[str, Any], timeout: int = 90) -> dict[str, Any]:
@@ -175,47 +185,6 @@ def description_from_markdown(markdown: str, limit: int = 160) -> str:
     return text[:limit].rsplit(" ", 1)[0] if len(text) > limit else text
 
 
-def fetch_keywords(base_url: str, token: str) -> list[dict[str, Any]]:
-    data = get_json(url_join(base_url, "/import/keywords", token))
-    return data.get("data", []) if isinstance(data, dict) else []
-
-
-def fetch_categories(base_url: str, token: str) -> list[dict[str, Any]]:
-    data = get_json(url_join(base_url, "/import/categories", token))
-    return data.get("data", []) if isinstance(data, dict) else []
-
-
-def match_keyword_id(keyword: str, keywords: list[dict[str, Any]]) -> int | None:
-    target = normalize(keyword).lower()
-    if not target:
-        return None
-    for item in keywords:
-        if normalize(item.get("title", "")).lower() == target:
-            try:
-                return int(item["id"])
-            except Exception:
-                return None
-    return None
-
-
-def match_category_id(category: str, categories: list[dict[str, Any]]) -> int | None:
-    normalized = normalize_category(category)
-    if normalized in CATEGORY_ID_MAP:
-        return CATEGORY_ID_MAP[normalized]
-
-    hints = CATEGORY_HINTS.get(normalized, [normalized])
-    for item in categories:
-        title = normalize(item.get("title", "")).lower()
-        template = normalize(item.get("template_dir", "")).lower()
-        blob = f"{title} {template}"
-        if any(h.lower() in blob for h in hints):
-            try:
-                return int(item["id"])
-            except Exception:
-                return None
-    return None
-
-
 def build_keywords(row: dict[str, str]) -> str:
     parts = [row.get("keyword", ""), row.get("category", ""), row.get("body_template", "")]
     clean = []
@@ -241,8 +210,29 @@ def filter_rows(rows: list[dict[str, str]], only_publish_ready: bool, max_articl
     return filtered
 
 
+def build_payload(row: dict[str, str], category_override: int = 0) -> tuple[dict[str, Any], str]:
+    title = normalize(row.get("title") or row.get("keyword"))
+    md_path = Path(row.get("markdown_path", ""))
+    if not md_path.exists():
+        raise FileNotFoundError(f"markdown not found: {md_path}")
+    raw_md = md_path.read_text(encoding="utf-8", errors="ignore")
+    content = ensure_cms_media(raw_md, title, row)
+    category_id = category_id_for_row(row, category_override)
+    payload: dict[str, Any] = {
+        "title": title,
+        "content": content,
+        "keywords": build_keywords(row),
+        "description": description_from_markdown(content),
+    }
+    if normalize(row.get("keyword_id", "")).isdigit():
+        payload["keyword_id"] = int(normalize(row.get("keyword_id", "")))
+    elif category_id:
+        payload["category_id"] = category_id
+    return payload, content
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Publish article Markdown files to CMS import API.")
+    parser = argparse.ArgumentParser(description="Publish article Markdown files to AnQiCMS import API.")
     parser.add_argument("queue", help="article_publish_queue.csv")
     parser.add_argument("--config", default="local_api_keys.json")
     parser.add_argument("--base-url", default="")
@@ -257,47 +247,31 @@ def main() -> int:
     config = load_config(args.config)
     if not config and args.config == "local_api_keys.json":
         config = load_config("scripts/local_api_keys.json")
-    base_url = cfg(args.base_url, "CMS_IMPORT_BASE_URL", config, "CMS_IMPORT_BASE_URL", DEFAULT_BASE_URL)
-    token = cfg(args.token, "CMS_IMPORT_TOKEN", config, "CMS_IMPORT_TOKEN")
+    base_url = first_value(args.base_url, ["CMS_IMPORT_BASE_URL", "ANQICMS_IMPORT_BASE_URL"], config, ["CMS_IMPORT_BASE_URL", "ANQICMS_IMPORT_BASE_URL"], DEFAULT_BASE_URL)
+    token = first_value(args.token, ["CMS_IMPORT_TOKEN", "ANQICMS_IMPORT_TOKEN"], config, ["CMS_IMPORT_TOKEN", "ANQICMS_IMPORT_TOKEN"])
     if args.publish and not token:
-        raise SystemExit("Missing CMS token. Set CMS_IMPORT_TOKEN, put it in local_api_keys.json, or pass --token.")
+        raise SystemExit("Missing CMS token. Set CMS_IMPORT_TOKEN or ANQICMS_IMPORT_TOKEN in local_api_keys.json/env, or pass --token.")
 
     queue_rows = filter_rows(read_csv(Path(args.queue)), bool(args.only_publish_ready), int(args.max_articles or 0))
-    keywords = fetch_keywords(base_url, token) if args.publish and token else []
-    categories = fetch_categories(base_url, token) if args.publish and token else []
-    article_url = url_join(base_url, "/import/article", token) if args.publish else ""
+    article_url = import_url(base_url, token) if args.publish else ""
 
     results: list[dict[str, Any]] = []
     for idx, row in enumerate(queue_rows, start=1):
         title = normalize(row.get("title") or row.get("keyword"))
-        md_path = Path(row.get("markdown_path", ""))
-        if not md_path.exists():
-            results.append({"title": title, "status": "error", "cms_id": "", "message": f"markdown not found: {md_path}"})
+        try:
+            payload, content = build_payload(row, int(args.category_id or 0))
+        except Exception as exc:  # noqa: BLE001
+            results.append({"title": title, "status": "error", "cms_id": "", "message": str(exc)[:500]})
             continue
-        raw_md = md_path.read_text(encoding="utf-8", errors="ignore")
-        content = ensure_cms_media(raw_md, title, row)
-        keyword_id = match_keyword_id(row.get("keyword", ""), keywords) if args.publish else None
-        category_id = None if keyword_id else (args.category_id or match_category_id(row.get("category", ""), categories))
 
-        payload: dict[str, Any] = {
-            "title": title,
-            "content": content,
-            "keywords": build_keywords(row),
-            "description": description_from_markdown(content),
-        }
-        if keyword_id:
-            payload["keyword_id"] = keyword_id
-        elif category_id:
-            payload["category_id"] = category_id
-
-        if args.publish and not payload.get("keyword_id") and not payload.get("category_id"):
+        if not payload.get("keyword_id") and not payload.get("category_id"):
             results.append({"title": title, "status": "error", "cms_id": "", "message": "missing keyword_id/category_id"})
             continue
 
         if not args.publish:
             video_mode = "real_youtube" if has_real_youtube(content) else "cms_fallback_video"
-            id_mode = f"fixed_category_id={category_id}" if category_id else "missing_category_id"
-            message = json.dumps({"payload_preview": payload, "video_mode": video_mode, "id_mode": id_mode}, ensure_ascii=False)[:900]
+            id_mode = f"keyword_id={payload.get('keyword_id')}" if payload.get("keyword_id") else f"category_id={payload.get('category_id')}"
+            message = json.dumps({"payload_preview": payload, "video_mode": video_mode, "id_mode": id_mode}, ensure_ascii=False)[:1000]
             results.append({"title": title, "status": "dry_run", "cms_id": "", "message": message})
             continue
 
@@ -310,12 +284,14 @@ def main() -> int:
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="ignore")
             results.append({"title": title, "status": "error", "cms_id": "", "message": f"HTTP {exc.code}: {body[:500]}"})
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             results.append({"title": title, "status": "error", "cms_id": "", "message": str(exc)[:500]})
 
     write_csv(Path(args.output), results, ["title", "status", "cms_id", "message"])
     print(f"Selected rows: {len(queue_rows)}")
-    print(f"Category mapping: weight_loss=1, cbd=5, blood=9")
+    print("Endpoint: /import/article")
+    print("Payload fields: title, content, keyword_id/category_id, keywords, description")
+    print("Category mapping: weight_loss=1, cbd=5, blood=9")
     print(f"Wrote CMS import results to {args.output}")
     if not args.publish:
         print("Dry run only. Add --publish to actually post articles.")
