@@ -222,10 +222,12 @@ with st.sidebar:
     st.caption(f"本地配置：Gemini {'已检测' if has_gemini else '未检测'} · YouTube {'已检测' if has_youtube else '未检测'}")
     if base_url or model_name:
         st.caption(f"模型：{model_name} · Base：{base_url or 'default'}")
-    use_ai = st.checkbox("使用 Gemini 中转 API 生成爆款正文", value=has_gemini)
+    use_ai = st.checkbox("使用 Gemini 中转 API 生成爆款正文", value=True)
+    if use_ai and not has_gemini:
+        st.warning("没有检测到 Gemini Key：请确认 local_api_keys.json 在项目根目录，且字段名是 GEMINI_API_KEY。")
     use_youtube = st.checkbox("使用 YouTube API 补充爆款角度", value=has_youtube)
     max_articles = st.number_input("每个分类最多生成几篇，0 = 全部", min_value=0, value=3, step=1)
-    overwrite = st.checkbox("覆盖已存在 Markdown", value=False)
+    overwrite = st.checkbox("覆盖已存在 Markdown（AI 模式建议保持开启）", value=True)
     start = st.button("开始运行", type="primary", use_container_width=True)
 
 if not selected_categories:
