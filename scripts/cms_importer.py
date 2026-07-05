@@ -10,9 +10,13 @@ Video rule:
 Image rule:
 - Ensure image-placeholder.png exists so the CMS can replace it later.
 
+Category rule:
+- Use fixed CMS category IDs by default: weight_loss=1, cbd=5, blood=9.
+- --category-id can still override the default mapping when needed.
+
 Safety rule:
 - Use --only-publish-ready to import only rows marked publish_ready=yes and quality_status=PASS.
-- Without --publish, the script performs dry-run only and will not POST to CMS.
+- Without --publish, the script performs dry-run only and will not POST to CMS. Dry-run does not require CMS_IMPORT_TOKEN.
 """
 
 from __future__ import annotations
@@ -30,6 +34,12 @@ from typing import Any
 DEFAULT_BASE_URL = "https://manage.teiastyle.com"
 DEFAULT_OUTPUT = "output/cms_import_results.csv"
 
+CATEGORY_ID_MAP = {
+    "weight_loss": 1,
+    "cbd": 5,
+    "blood": 9,
+}
+
 CATEGORY_HINTS = {
     "weight_loss": ["keto", "减肥", "减肥药", "weight", "weight loss"],
     "cbd": ["cbd"],
@@ -39,6 +49,17 @@ CATEGORY_HINTS = {
 
 def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def normalize_category(category: str) -> str:
+    raw = normalize(category).lower().replace("-", "_").replace(" ", "_")
+    if raw in {"weight", "weightloss", "weight_loss", "减肥", "减肥药"}:
+        return "weight_loss"
+    if raw in {"cbd", "hemp"}:
+        return "cbd"
+    if raw in {"blood", "blood_health", "blood_sugar", "blood_pressure", "血", "血糖", "血压"}:
+        return "blood"
+    return raw
 
 
 def read_csv(path: Path) -> list[dict[str, str]]:
@@ -178,7 +199,11 @@ def match_keyword_id(keyword: str, keywords: list[dict[str, Any]]) -> int | None
 
 
 def match_category_id(category: str, categories: list[dict[str, Any]]) -> int | None:
-    hints = CATEGORY_HINTS.get(category, [category])
+    normalized = normalize_category(category)
+    if normalized in CATEGORY_ID_MAP:
+        return CATEGORY_ID_MAP[normalized]
+
+    hints = CATEGORY_HINTS.get(normalized, [normalized])
     for item in categories:
         title = normalize(item.get("title", "")).lower()
         template = normalize(item.get("template_dir", "")).lower()
@@ -223,7 +248,7 @@ def main() -> int:
     parser.add_argument("--base-url", default="")
     parser.add_argument("--token", default="")
     parser.add_argument("--output", default=DEFAULT_OUTPUT)
-    parser.add_argument("--category-id", type=int, default=0, help="Fallback category_id if keyword/category matching fails")
+    parser.add_argument("--category-id", type=int, default=0, help="Override category_id. 0 means use fixed mapping: weight_loss=1, cbd=5, blood=9")
     parser.add_argument("--max-articles", type=int, default=0, help="0 means all")
     parser.add_argument("--only-publish-ready", action="store_true", help="Import only rows with publish_ready=yes and quality_status=PASS")
     parser.add_argument("--publish", action="store_true", help="Actually POST articles. Without this flag, dry-run only.")
@@ -234,13 +259,13 @@ def main() -> int:
         config = load_config("scripts/local_api_keys.json")
     base_url = cfg(args.base_url, "CMS_IMPORT_BASE_URL", config, "CMS_IMPORT_BASE_URL", DEFAULT_BASE_URL)
     token = cfg(args.token, "CMS_IMPORT_TOKEN", config, "CMS_IMPORT_TOKEN")
-    if not token:
+    if args.publish and not token:
         raise SystemExit("Missing CMS token. Set CMS_IMPORT_TOKEN, put it in local_api_keys.json, or pass --token.")
 
     queue_rows = filter_rows(read_csv(Path(args.queue)), bool(args.only_publish_ready), int(args.max_articles or 0))
-    keywords = fetch_keywords(base_url, token) if args.publish else []
-    categories = fetch_categories(base_url, token) if args.publish else []
-    article_url = url_join(base_url, "/import/article", token)
+    keywords = fetch_keywords(base_url, token) if args.publish and token else []
+    categories = fetch_categories(base_url, token) if args.publish and token else []
+    article_url = url_join(base_url, "/import/article", token) if args.publish else ""
 
     results: list[dict[str, Any]] = []
     for idx, row in enumerate(queue_rows, start=1):
@@ -252,7 +277,7 @@ def main() -> int:
         raw_md = md_path.read_text(encoding="utf-8", errors="ignore")
         content = ensure_cms_media(raw_md, title, row)
         keyword_id = match_keyword_id(row.get("keyword", ""), keywords) if args.publish else None
-        category_id = None if keyword_id else (args.category_id or match_category_id(row.get("category", ""), categories) if args.publish else args.category_id or None)
+        category_id = None if keyword_id else (args.category_id or match_category_id(row.get("category", ""), categories))
 
         payload: dict[str, Any] = {
             "title": title,
@@ -271,7 +296,7 @@ def main() -> int:
 
         if not args.publish:
             video_mode = "real_youtube" if has_real_youtube(content) else "cms_fallback_video"
-            id_mode = "keyword/category resolved on publish" if not payload.get("keyword_id") and not payload.get("category_id") else "fallback category_id present"
+            id_mode = f"fixed_category_id={category_id}" if category_id else "missing_category_id"
             message = json.dumps({"payload_preview": payload, "video_mode": video_mode, "id_mode": id_mode}, ensure_ascii=False)[:900]
             results.append({"title": title, "status": "dry_run", "cms_id": "", "message": message})
             continue
@@ -290,6 +315,7 @@ def main() -> int:
 
     write_csv(Path(args.output), results, ["title", "status", "cms_id", "message"])
     print(f"Selected rows: {len(queue_rows)}")
+    print(f"Category mapping: weight_loss=1, cbd=5, blood=9")
     print(f"Wrote CMS import results to {args.output}")
     if not args.publish:
         print("Dry run only. Add --publish to actually post articles.")
