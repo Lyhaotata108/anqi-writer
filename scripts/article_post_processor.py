@@ -3,9 +3,10 @@
 """Clean generated Markdown articles and build local HTML previews.
 
 Post-processing goals:
-- Add a stable H2 Table of Contents.
-- Remove duplicate Last updated lines.
+- Add a stable H2 Table of Contents near the top of the article.
+- Remove duplicate Last updated lines and noisy horizontal separators.
 - Convert AI-only XML-ish blocks such as <Sequence>/<Step> to Markdown.
+- Convert fenced ASCII boxes/diagrams into normal Markdown bullets or quotes.
 - Remove CMS-unfriendly LaTeX fragments.
 - Ensure a final ## Important Note section exists.
 - Keep image-placeholder.png for CMS image replacement.
@@ -16,7 +17,6 @@ from __future__ import annotations
 from pathlib import Path
 import html
 import re
-from typing import Any
 
 YOUTUBE_RE = re.compile(r"youtube\.com/(?:embed/|watch\?v=|shorts/)|youtu\.be/", re.I)
 
@@ -62,6 +62,13 @@ def remove_duplicate_last_updated(body: str) -> str:
     return "\n".join(out)
 
 
+def remove_horizontal_separators(body: str) -> str:
+    # Gemini often inserts --- after every section. It looks noisy in CMS previews,
+    # so remove body-only separators while leaving YAML front matter untouched.
+    lines = [line for line in body.splitlines() if line.strip() not in {"---", "***", "___"}]
+    return "\n".join(lines)
+
+
 def parse_attrs(attr_text: str) -> dict[str, str]:
     attrs: dict[str, str] = {}
     for key, value in re.findall(r"(\w+)=['\"]([^'\"]*)['\"]", attr_text or ""):
@@ -93,6 +100,76 @@ def convert_sequence_steps(body: str) -> str:
     return body
 
 
+def clean_box_line(line: str) -> str:
+    item = line.strip()
+    item = item.strip("` ")
+    if re.fullmatch(r"[+\-|\s=]+", item):
+        return ""
+    if item.startswith("|") and item.endswith("|"):
+        item = item.strip("|").strip()
+    return normalize(item)
+
+
+def convert_quick_take_block(lines: list[str]) -> str:
+    bullets: list[str] = []
+    current = ""
+    for raw in lines:
+        item = clean_box_line(raw)
+        if not item or item.upper() == "THE QUICK TAKE":
+            continue
+        if item.startswith("*"):
+            if current:
+                bullets.append(current)
+            current = re.sub(r"^\*\s*", "", item).strip()
+        elif current:
+            current += " " + item
+        else:
+            bullets.append(item)
+    if current:
+        bullets.append(current)
+    if not bullets:
+        return ""
+    out = ["> **Quick Take**", ""]
+    for bullet in bullets:
+        out.append(f"- {bullet}")
+    return "\n".join(out)
+
+
+def convert_diagram_block(lines: list[str]) -> str:
+    converted: list[str] = []
+    for raw in lines:
+        item = clean_box_line(raw)
+        if not item:
+            continue
+        match = re.match(r"^\[([^\]]+)\]\s*-+>\s*(.+)$", item)
+        if match:
+            converted.append(f"- **{match.group(1).strip()}:** {match.group(2).strip()}")
+        else:
+            converted.append(f"> {item}")
+    return "\n".join(converted)
+
+
+def convert_code_block(match: re.Match[str]) -> str:
+    raw = match.group(2)
+    lines = raw.splitlines()
+    joined = "\n".join(lines)
+    if "THE QUICK TAKE" in joined.upper():
+        converted = convert_quick_take_block(lines)
+    elif re.search(r"\[[^\]]+\]\s*-+>", joined):
+        converted = convert_diagram_block(lines)
+    else:
+        cleaned = [clean_box_line(line) for line in lines]
+        cleaned = [line for line in cleaned if line]
+        converted = "\n".join(f"> {line}" for line in cleaned)
+    return "\n\n" + converted.strip() + "\n\n" if converted.strip() else "\n"
+
+
+def convert_code_fences(body: str) -> str:
+    body = re.sub(r"```([a-zA-Z0-9_-]+)?\s*\n(.*?)\n```", convert_code_block, body, flags=re.S)
+    body = re.sub(r"``+", "", body)
+    return body
+
+
 def normalize_latex(body: str) -> str:
     replacements = {
         r"\$\\text\{kg/m\}\^2\$": "kg/m²",
@@ -117,7 +194,9 @@ def fix_common_typos(body: str) -> str:
     fixes = {
         "deducible requirements": "deductible requirements",
         "lean lean muscle mass": "lean muscle mass",
-        "clear-cutting glucose": "clearing glucose",
+        "cellular cellular voltage": "cellular voltage",
+        "an completely separate": "a completely separate",
+        "as a effortless": "as an effortless",
         "Internet": "internet",
     }
     out = body
@@ -159,14 +238,12 @@ def insert_toc(body: str) -> str:
     toc = build_toc(body)
     if not toc:
         return body
-    marker = "## The Short Version"
-    idx = body.find(marker)
-    if idx >= 0:
-        return body[:idx].rstrip() + "\n\n" + toc + "\n\n" + body[idx:].lstrip()
-    lines = body.split("\n\n")
-    insert_at = min(3, max(1, len(lines)))
-    lines.insert(insert_at, toc)
-    return "\n\n".join(lines)
+    # Always place the TOC before the first H2, so it appears after the intro,
+    # even if Gemini started with a different H2 before The Short Version.
+    match = re.search(r"^##\s+", body, flags=re.M)
+    if match:
+        return body[: match.start()].rstrip() + "\n\n" + toc + "\n\n" + body[match.start():].lstrip()
+    return body.rstrip() + "\n\n" + toc
 
 
 def default_disclaimer(category: str) -> str:
@@ -187,7 +264,6 @@ def ensure_important_note(body: str, category: str) -> str:
     body = re.sub(r"^###\s+Important Note", "## Important Note", body, flags=re.I | re.M)
     if re.search(r"^##\s+Important Note\b", body, flags=re.I | re.M):
         return body
-
     patterns = [
         r"\*\*Important Note(?: and Medical Disclaimer)?[:：]\*\*\s*(.*)$",
         r"\*Medical Disclaimer[:：]\s*(.*?)\*\s*$",
@@ -214,25 +290,19 @@ def post_process_markdown(markdown: str, category: str = "weight_loss") -> tuple
     if not category:
         category = extract_front_matter_value(front, "category") or "weight_loss"
 
-    before = body
-    body = remove_duplicate_last_updated(body)
-    if body != before:
-        notes.append("deduped_last_updated")
-
-    before = body
-    body = convert_sequence_steps(body)
-    if body != before:
-        notes.append("converted_sequence_steps")
-
-    before = body
-    body = normalize_latex(body)
-    if body != before:
-        notes.append("removed_latex")
-
-    before = body
-    body = fix_common_typos(body)
-    if body != before:
-        notes.append("fixed_common_typos")
+    transforms = [
+        ("deduped_last_updated", remove_duplicate_last_updated),
+        ("removed_horizontal_separators", remove_horizontal_separators),
+        ("converted_sequence_steps", convert_sequence_steps),
+        ("converted_code_fences", convert_code_fences),
+        ("removed_latex", normalize_latex),
+        ("fixed_common_typos", fix_common_typos),
+    ]
+    for note, func in transforms:
+        before = body
+        body = func(body)
+        if body != before:
+            notes.append(note)
 
     before = body
     body = ensure_important_note(body, category)
@@ -302,12 +372,17 @@ def markdown_body_to_html(body: str) -> str:
 
     for raw in lines:
         line = raw.rstrip()
-        if not line.strip():
+        stripped = line.strip()
+        if not stripped:
             flush_paragraph(); close_list(); flush_table()
             continue
-        if line.strip().startswith("<iframe"):
+        if stripped in {"---", "***", "___"}:
             flush_paragraph(); close_list(); flush_table()
-            out.append(f'<div class="video-wrap">{line.strip()}</div>')
+            out.append("<hr>")
+            continue
+        if stripped.startswith("<iframe"):
+            flush_paragraph(); close_list(); flush_table()
+            out.append(f'<div class="video-wrap">{stripped}</div>')
             continue
         if line.startswith("|") and line.endswith("|"):
             flush_paragraph(); close_list()
@@ -315,7 +390,7 @@ def markdown_body_to_html(body: str) -> str:
             continue
         else:
             flush_table()
-        image_match = re.match(r"!\[([^\]]*)\]\(([^\)]+)\)", line.strip())
+        image_match = re.match(r"!\[([^\]]*)\]\(([^\)]+)\)", stripped)
         if image_match:
             flush_paragraph(); close_list()
             alt = html.escape(image_match.group(1) or "Image placeholder")
@@ -383,6 +458,7 @@ a {{ color:var(--accent); text-decoration:none; }}
 ul {{ padding-left: 24px; margin: 0 0 24px; }}
 li {{ margin: 8px 0; font-size: 18px; }}
 blockquote {{ border-left:4px solid var(--accent); background:#ecfdf5; padding:16px 20px; margin:24px 0; border-radius:12px; }}
+hr {{ border:0; border-top:1px solid var(--line); margin:34px 0; }}
 table {{ width:100%; border-collapse: collapse; margin:28px 0; overflow:hidden; border-radius:16px; font-size:16px; }}
 th, td {{ border:1px solid var(--line); padding:14px 16px; vertical-align:top; }}
 th {{ background:#f1f5f9; text-align:left; }}
