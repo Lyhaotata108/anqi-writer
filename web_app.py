@@ -109,7 +109,6 @@ def run_command(args: list[str]) -> tuple[bool, str]:
 
 
 def cleanup_history(current_run_name: str, keep_runs: int = 8, older_than_days: int = 0) -> list[str]:
-    """Delete old output/web_runs directories only. The current run is always protected."""
     if not WEB_RUN_DIR.exists():
         return []
     current_safe = safe_run_name(current_run_name)
@@ -129,7 +128,7 @@ def cleanup_history(current_run_name: str, keep_runs: int = 8, older_than_days: 
             try:
                 shutil.rmtree(path)
                 deleted.append(path.name)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 deleted.append(f"FAILED:{path.name}:{exc}")
     return deleted
 
@@ -185,11 +184,7 @@ def run_pipeline(keywords: list[str], run_name: str, category: str, use_ai: bool
 def run_cms_import(paths: dict[str, Path], settings: dict[str, int | bool]) -> tuple[bool, str]:
     if not paths["publish_queue"].exists():
         return False, "发布队列 article_publish_queue.csv 不存在，无法导入 CMS。"
-    cmd = [
-        sys.executable, "scripts/cms_importer.py", str(paths["publish_queue"]),
-        "--config", "local_api_keys.json",
-        "--output", str(paths["cms_results"]),
-    ]
+    cmd = [sys.executable, "scripts/cms_importer.py", str(paths["publish_queue"]), "--config", "local_api_keys.json", "--output", str(paths["cms_results"])]
     if int(settings.get("max_articles", 0) or 0) > 0:
         cmd.extend(["--max-articles", str(int(settings.get("max_articles", 0) or 0))])
     if int(settings.get("category_id", 0) or 0) > 0:
@@ -279,7 +274,7 @@ ensure_dirs()
 config = local_config()
 has_gemini = bool(cfg_value(config, ["GEMINI_API_KEY", "OPENAI_API_KEY"]))
 has_youtube = bool(cfg_value(config, ["YOUTUBE_DATA_API_KEY"]))
-has_cms = bool(cfg_value(config, ["CMS_IMPORT_TOKEN"]))
+has_cms = True
 model_name = cfg_value(config, ["GEMINI_MODEL", "OPENAI_MODEL"], "gemini-3-flash-preview")
 base_url = cfg_value(config, ["GEMINI_BASE_URL", "OPENAI_BASE_URL"], "")
 
@@ -291,7 +286,7 @@ with st.sidebar:
     selected_labels = st.multiselect("要运行的分类", list(CATEGORY_OPTIONS.keys()), default=list(CATEGORY_OPTIONS.keys()))
     selected_categories = [CATEGORY_OPTIONS[label] for label in selected_labels]
     run_name = st.text_input("运行名称", "multi_" + time.strftime("%Y%m%d_%H%M%S"))
-    st.caption(f"本地配置：Gemini {'已检测' if has_gemini else '未检测'} · YouTube {'已检测' if has_youtube else '未检测'} · CMS Token {'已检测' if has_cms else '未检测'}")
+    st.caption(f"本地配置：Gemini {'已检测' if has_gemini else '未检测'} · YouTube {'已检测' if has_youtube else '未检测'} · CMS 导入默认可用")
     if base_url or model_name:
         st.caption(f"模型：{model_name} · Base：{base_url or 'default'}")
     use_ai = st.checkbox("使用 Gemini 中转 API 生成爆款正文", value=True)
@@ -308,9 +303,7 @@ with st.sidebar:
     cms_only_ready = st.checkbox("只导入 publish_ready = yes 的文章", value=True, disabled=not cms_auto_import)
     cms_max_articles = st.number_input("CMS 每个分类最多导入几篇，0 = 全部", min_value=0, value=0, step=1, disabled=not cms_auto_import)
     cms_category_id = st.number_input("覆盖 category_id，0 = 使用固定映射", min_value=0, value=0, step=1, disabled=not cms_auto_import)
-    st.caption("固定映射：Weight Loss = 1，CBD = 5，Blood = 9。Dry-run 不需要 CMS_IMPORT_TOKEN，真实发布才需要。")
-    if cms_auto_import and cms_publish and not has_cms:
-        st.warning("没有检测到 CMS_IMPORT_TOKEN：真实发布会失败；关闭“真正发布到 CMS”可先 dry-run。")
+    st.caption("固定映射：Weight Loss = 1，CBD = 5，Blood = 9。真实发布会使用导入脚本默认 token；如需覆盖，可在本地配置或环境变量里设置。")
     if cms_auto_import and cms_publish:
         st.warning("已开启真实发布。建议先关闭此项 dry-run 测试。")
 
@@ -383,12 +376,7 @@ else:
         paths = {k: Path(v) for k, v in raw_paths.items()}
         publish = read_csv_df(paths["publish_queue"])
         cms = read_csv_df(paths["cms_results"])
-        rows.append({
-            "category": CATEGORY_LABELS.get(category, category),
-            "markdown_articles": len(publish) if not publish.empty else 0,
-            "cms_rows": len(cms) if not cms.empty else 0,
-            "run_dir": str(paths["run_dir"]),
-        })
+        rows.append({"category": CATEGORY_LABELS.get(category, category), "markdown_articles": len(publish) if not publish.empty else 0, "cms_rows": len(cms) if not cms.empty else 0, "run_dir": str(paths["run_dir"])})
     st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
     result_tabs = st.tabs([CATEGORY_LABELS.get(c, c) for c in paths_by_category.keys()])
