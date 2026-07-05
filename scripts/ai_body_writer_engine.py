@@ -6,8 +6,11 @@ Video rule:
 - If YouTube API returns a relevant video, write a real YouTube embed URL into the article iframe.
 - If no YouTube video is found, do not insert a video iframe. The CMS can fall back to its keyword-library video.
 
-Image rule:
-- Always keep the CMS image placeholder: ![Image description](image-placeholder.png)
+Post-processing rule:
+- Clean duplicate dates, XML-ish AI tags, LaTeX fragments, and common typos.
+- Insert ## Table of Contents.
+- Ensure ## Important Note.
+- Generate a local HTML preview file for visual checking.
 """
 
 from __future__ import annotations
@@ -23,6 +26,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
+
+from article_post_processor import post_process_markdown, write_preview_html
 
 DEFAULT_ARTICLES_DIR = "output/ai_articles"
 DEFAULT_QUEUE_OUTPUT = "output/ai_article_publish_queue.csv"
@@ -263,14 +268,19 @@ CMS media requirements:
 - Include exactly one image placeholder in the article body using Markdown: ![Relevant description](image-placeholder.png)
 - Do not add any YouTube iframe yourself. The system will insert a real YouTube iframe only when a valid YouTube API result exists.
 
-Style requirements:
+Structure requirements:
 - Start with a search-intent hook, not a dictionary definition.
 - Include a section called "The Short Version" within the first 300 words.
+- Include an "Important Note" disclaimer near the end.
+- Do not manually add a Table of Contents. The system will generate it after writing.
+
+Style requirements:
 - Use the H2 plan, but make every section substantially different.
 - Include one useful Markdown table tailored to the topic.
 - Include a practical protocol/checklist section.
 - Include FAQ using natural questions, not awkward keyword rewrites.
-- Include an "Important Note" disclaimer near the end.
+- Do not use XML-like tags such as <Sequence> or <Step>.
+- Do not use LaTeX syntax such as $\\ge$ or $\\text{{kg/m}}^2$.
 - Do not mention that you are following a blueprint.
 - Do not include code fences.
 
@@ -383,9 +393,9 @@ def quality_check(markdown: str, row: dict[str, str], selected_youtube_embed_url
         target = 2200
     if wc < int(target * 0.65):
         notes.append(f"word_count_below_target:{wc}/{target}")
-    if len(re.findall(r"^## ", markdown, flags=re.M)) < 5:
+    if len(re.findall(r"^## ", markdown, flags=re.M)) < 6:
         notes.append("too_few_h2")
-    for required in ["The Short Version", "Frequently Asked", "Important Note", "image-placeholder.png"]:
+    for required in ["Table of Contents", "The Short Version", "Frequently Asked", "Important Note", "image-placeholder.png"]:
         if required not in markdown:
             notes.append(f"missing:{required}")
     if selected_youtube_embed_url and selected_youtube_embed_url not in markdown:
@@ -394,6 +404,10 @@ def quality_check(markdown: str, row: dict[str, str], selected_youtube_embed_url
         notes.append("unsafe_claim_language")
     if re.search(r"\b(this section should|open with|summarize what|blueprint|provided h2 plan)\b", markdown, flags=re.I):
         notes.append("instruction_leak")
+    if re.search(r"<\/?(?:Sequence|Step)\b", markdown, flags=re.I):
+        notes.append("xml_step_tag_leak")
+    if re.search(r"\$|\\text\{|\\ge|\\le", markdown):
+        notes.append("latex_leak")
     repeated = repeated_paragraph_count(markdown)
     if repeated:
         notes.append(f"repeated_paragraphs:{repeated}")
@@ -437,7 +451,9 @@ def main() -> int:
         raise SystemExit(f"Input not found: {input_path}")
 
     article_dir = Path(args.articles_dir)
+    preview_dir = article_dir.parent / "previews"
     article_dir.mkdir(parents=True, exist_ok=True)
+    preview_dir.mkdir(parents=True, exist_ok=True)
     source_rows = [row for row in read_csv(input_path) if row.get("publish_role", "primary_article") == "primary_article"]
     if args.max_articles and args.max_articles > 0:
         source_rows = source_rows[: args.max_articles]
@@ -447,11 +463,13 @@ def main() -> int:
         title = normalize(row.get("title") or row.get("keyword") or "Article")
         slug = slugify(row.get("keyword") or title)
         path = article_dir / f"{slug}.md"
+        preview_path = preview_dir / f"{slug}.html"
         generation_status = "generated"
         error_message = ""
         yt_results: list[dict[str, str]] = []
         selected_youtube_url = ""
         selected_youtube_embed_url = ""
+        post_notes: list[str] = []
 
         if path.exists() and not args.overwrite:
             markdown = path.read_text(encoding="utf-8", errors="ignore")
@@ -468,7 +486,6 @@ def main() -> int:
                     selected_youtube_embed_url = yt_results[0].get("embed_url", "") if yt_results else ""
                 raw = call_chat_completion(api_key, api_base, model, row, args.temperature, args.timeout, youtube_context)
                 markdown = clean_markdown(raw, row, selected_youtube_url, selected_youtube_embed_url)
-                path.write_text(markdown, encoding="utf-8")
                 time.sleep(args.sleep)
             except Exception as exc:  # noqa: BLE001
                 markdown = ""
@@ -476,7 +493,11 @@ def main() -> int:
                 error_message = str(exc)[:1200]
 
         if markdown:
+            markdown, post_notes = post_process_markdown(markdown, clean_category(row))
+            path.write_text(markdown, encoding="utf-8")
+            write_preview_html(markdown, preview_path)
             quality_status, publish_ready, notes = quality_check(markdown, row, selected_youtube_embed_url)
+            notes.extend(f"post:{note}" for note in post_notes)
             wc = word_count(markdown)
         else:
             quality_status, publish_ready, notes, wc = "ERROR", False, [error_message], 0
@@ -487,6 +508,7 @@ def main() -> int:
             "title": title,
             "slug": slug,
             "markdown_path": str(path),
+            "preview_html_path": str(preview_path) if markdown else "",
             "word_count": wc,
             "target_word_count": row.get("target_word_count", ""),
             "body_template": row.get("body_template", ""),
@@ -500,7 +522,7 @@ def main() -> int:
             "quality_notes": " | ".join(notes),
         })
 
-    fields = ["category", "keyword", "title", "slug", "markdown_path", "word_count", "target_word_count", "body_template", "api_model", "generation_status", "youtube_results_count", "selected_youtube_url", "selected_youtube_embed_url", "quality_status", "publish_ready", "quality_notes"]
+    fields = ["category", "keyword", "title", "slug", "markdown_path", "preview_html_path", "word_count", "target_word_count", "body_template", "api_model", "generation_status", "youtube_results_count", "selected_youtube_url", "selected_youtube_embed_url", "quality_status", "publish_ready", "quality_notes"]
     write_csv(Path(args.queue_output), queue_rows, fields)
     pass_count = sum(1 for row in queue_rows if row["quality_status"] == "PASS")
     errors = sum(1 for row in queue_rows if row["quality_status"] == "ERROR")
@@ -509,6 +531,7 @@ def main() -> int:
     print(f"YouTube context: {'on' if args.use_youtube_context and youtube_api_key else 'off'}")
     print(f"Wrote {len(queue_rows)} queue rows to {args.queue_output}")
     print(f"Articles directory: {article_dir}")
+    print(f"HTML previews directory: {preview_dir}")
     print(f"Quality: {pass_count} PASS · {len(queue_rows) - pass_count - errors} REVIEW · {errors} ERROR")
     return 0
 
