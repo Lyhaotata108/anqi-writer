@@ -9,6 +9,10 @@ Video rule:
 
 Image rule:
 - Ensure image-placeholder.png exists so the CMS can replace it later.
+
+Safety rule:
+- Use --only-publish-ready to import only rows marked publish_ready=yes and quality_status=PASS.
+- Without --publish, the script performs dry-run only and will not POST to CMS.
 """
 
 from __future__ import annotations
@@ -199,6 +203,19 @@ def build_keywords(row: dict[str, str]) -> str:
     return ",".join(clean)
 
 
+def is_publish_ready(row: dict[str, str]) -> bool:
+    publish_ready = normalize(row.get("publish_ready", "")).lower()
+    quality_status = normalize(row.get("quality_status", "")).upper()
+    return publish_ready in {"yes", "true", "1", "pass"} and quality_status in {"PASS", ""}
+
+
+def filter_rows(rows: list[dict[str, str]], only_publish_ready: bool, max_articles: int) -> list[dict[str, str]]:
+    filtered = [row for row in rows if is_publish_ready(row)] if only_publish_ready else rows
+    if max_articles and max_articles > 0:
+        filtered = filtered[:max_articles]
+    return filtered
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Publish article Markdown files to CMS import API.")
     parser.add_argument("queue", help="article_publish_queue.csv")
@@ -208,6 +225,7 @@ def main() -> int:
     parser.add_argument("--output", default=DEFAULT_OUTPUT)
     parser.add_argument("--category-id", type=int, default=0, help="Fallback category_id if keyword/category matching fails")
     parser.add_argument("--max-articles", type=int, default=0, help="0 means all")
+    parser.add_argument("--only-publish-ready", action="store_true", help="Import only rows with publish_ready=yes and quality_status=PASS")
     parser.add_argument("--publish", action="store_true", help="Actually POST articles. Without this flag, dry-run only.")
     args = parser.parse_args()
 
@@ -219,10 +237,7 @@ def main() -> int:
     if not token:
         raise SystemExit("Missing CMS token. Set CMS_IMPORT_TOKEN, put it in local_api_keys.json, or pass --token.")
 
-    queue_rows = read_csv(Path(args.queue))
-    if args.max_articles and args.max_articles > 0:
-        queue_rows = queue_rows[: args.max_articles]
-
+    queue_rows = filter_rows(read_csv(Path(args.queue)), bool(args.only_publish_ready), int(args.max_articles or 0))
     keywords = fetch_keywords(base_url, token) if args.publish else []
     categories = fetch_categories(base_url, token) if args.publish else []
     article_url = url_join(base_url, "/import/article", token)
@@ -250,13 +265,14 @@ def main() -> int:
         elif category_id:
             payload["category_id"] = category_id
 
-        if not payload.get("keyword_id") and not payload.get("category_id"):
+        if args.publish and not payload.get("keyword_id") and not payload.get("category_id"):
             results.append({"title": title, "status": "error", "cms_id": "", "message": "missing keyword_id/category_id"})
             continue
 
         if not args.publish:
             video_mode = "real_youtube" if has_real_youtube(content) else "cms_fallback_video"
-            message = json.dumps({"payload_preview": payload, "video_mode": video_mode}, ensure_ascii=False)[:700]
+            id_mode = "keyword/category resolved on publish" if not payload.get("keyword_id") and not payload.get("category_id") else "fallback category_id present"
+            message = json.dumps({"payload_preview": payload, "video_mode": video_mode, "id_mode": id_mode}, ensure_ascii=False)[:900]
             results.append({"title": title, "status": "dry_run", "cms_id": "", "message": message})
             continue
 
@@ -273,6 +289,7 @@ def main() -> int:
             results.append({"title": title, "status": "error", "cms_id": "", "message": str(exc)[:500]})
 
     write_csv(Path(args.output), results, ["title", "status", "cms_id", "message"])
+    print(f"Selected rows: {len(queue_rows)}")
     print(f"Wrote CMS import results to {args.output}")
     if not args.publish:
         print("Dry run only. Add --publish to actually post articles.")
