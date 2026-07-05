@@ -9,13 +9,8 @@ This importer follows the same contract as the legacy publish_articles.py:
 - JSON payload fields: title, content, keyword_id, category_id, keywords, description
 - Fixed category IDs: weight_loss=1, cbd=5, blood=9
 
-Safety:
-- Without --publish, this script only performs dry-run.
-- With --publish, it uses --token, CMS_IMPORT_TOKEN, ANQICMS_IMPORT_TOKEN, or the default fallback token.
-- Use --only-publish-ready to import only rows marked publish_ready=yes and quality_status=PASS.
-
-Network compatibility:
-- POST requests include browser-like headers to avoid simple WAF/Cloudflare blocks that reject Python's default urllib user agent.
+CMS rendering rule:
+- AnQiCMS templates render the title field separately, so the imported content removes the leading Markdown H1 to avoid duplicate titles.
 """
 
 from __future__ import annotations
@@ -156,6 +151,12 @@ def strip_front_matter(markdown: str) -> str:
     return re.sub(r"^---\s*\n.*?\n---\s*\n", "", text, flags=re.S).strip()
 
 
+def remove_leading_h1(markdown: str) -> str:
+    """Remove the article H1 from CMS content; CMS uses payload['title'] for the page title."""
+    text = str(markdown or "").lstrip()
+    return re.sub(r"^#\s+.+?\n+", "", text, count=1, flags=re.M).lstrip()
+
+
 def youtube_embed_from_url(url: str) -> str:
     raw = normalize(url)
     if not raw or "youtube-url-placeholder" in raw:
@@ -186,6 +187,7 @@ def remove_placeholder_youtube(text: str) -> str:
 
 def ensure_cms_media(markdown: str, title: str, row: dict[str, str]) -> str:
     text = strip_front_matter(markdown)
+    text = remove_leading_h1(text)
     text = remove_placeholder_youtube(text)
     if "image-placeholder.png" not in text:
         image_md = f"![{normalize(title)}](image-placeholder.png)"
@@ -325,6 +327,7 @@ def main() -> int:
     write_csv(Path(args.output), results, ["title", "status", "cms_id", "message"])
     print(f"Selected rows: {len(queue_rows)}")
     print("Endpoint: /import/article")
+    print("Content rule: leading Markdown H1 removed before CMS import")
     print("Token source: --token / env / local config / default fallback")
     print("Headers: browser-like User-Agent, Origin, Referer, Accept, X-Requested-With")
     print("Payload fields: title, content, keyword_id/category_id, keywords, description")
