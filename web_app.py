@@ -291,7 +291,7 @@ with st.sidebar:
     selected_labels = st.multiselect("要运行的分类", list(CATEGORY_OPTIONS.keys()), default=list(CATEGORY_OPTIONS.keys()))
     selected_categories = [CATEGORY_OPTIONS[label] for label in selected_labels]
     run_name = st.text_input("运行名称", "multi_" + time.strftime("%Y%m%d_%H%M%S"))
-    st.caption(f"本地配置：Gemini {'已检测' if has_gemini else '未检测'} · YouTube {'已检测' if has_youtube else '未检测'} · CMS {'已检测' if has_cms else '未检测'}")
+    st.caption(f"本地配置：Gemini {'已检测' if has_gemini else '未检测'} · YouTube {'已检测' if has_youtube else '未检测'} · CMS Token {'已检测' if has_cms else '未检测'}")
     if base_url or model_name:
         st.caption(f"模型：{model_name} · Base：{base_url or 'default'}")
     use_ai = st.checkbox("使用 Gemini 中转 API 生成爆款正文", value=True)
@@ -307,9 +307,10 @@ with st.sidebar:
     cms_publish = st.checkbox("真正发布到 CMS（关闭则只 dry-run）", value=False, disabled=not cms_auto_import)
     cms_only_ready = st.checkbox("只导入 publish_ready = yes 的文章", value=True, disabled=not cms_auto_import)
     cms_max_articles = st.number_input("CMS 每个分类最多导入几篇，0 = 全部", min_value=0, value=0, step=1, disabled=not cms_auto_import)
-    cms_category_id = st.number_input("备用 category_id，0 = 自动匹配", min_value=0, value=0, step=1, disabled=not cms_auto_import)
-    if cms_auto_import and not has_cms:
-        st.warning("没有检测到 CMS_IMPORT_TOKEN：自动导入会失败。")
+    cms_category_id = st.number_input("覆盖 category_id，0 = 使用固定映射", min_value=0, value=0, step=1, disabled=not cms_auto_import)
+    st.caption("固定映射：Weight Loss = 1，CBD = 5，Blood = 9。Dry-run 不需要 CMS_IMPORT_TOKEN，真实发布才需要。")
+    if cms_auto_import and cms_publish and not has_cms:
+        st.warning("没有检测到 CMS_IMPORT_TOKEN：真实发布会失败；关闭“真正发布到 CMS”可先 dry-run。")
     if cms_auto_import and cms_publish:
         st.warning("已开启真实发布。建议先关闭此项 dry-run 测试。")
 
