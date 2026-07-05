@@ -7,10 +7,14 @@ Video rule:
 - If no YouTube video is found, do not insert a video iframe. The CMS can fall back to its keyword-library video.
 
 Post-processing rule:
-- Clean duplicate dates, XML-ish AI tags, LaTeX fragments, and common typos.
-- Insert ## Table of Contents.
+- Clean duplicate dates, noisy separators, ASCII code boxes, XML-ish AI tags, LaTeX fragments, and common typos.
+- Insert ## Table of Contents near the top of the article.
 - Ensure ## Important Note.
 - Generate a local HTML preview file for visual checking.
+
+Reliability rule:
+- Use a higher max token budget by default.
+- Retry incomplete articles once when FAQ/H2/word-count checks fail.
 """
 
 from __future__ import annotations
@@ -240,7 +244,7 @@ def system_prompt(category: str) -> str:
     return base + " For weight-loss content, be realistic about mechanisms, adherence, side effects, cost, maintenance, and clinician guidance for medications or supplements."
 
 
-def user_prompt(row: dict[str, str], youtube_context: str = "") -> str:
+def user_prompt(row: dict[str, str], youtube_context: str = "", extra_instruction: str = "") -> str:
     category = clean_category(row)
     target = normalize(row.get("target_word_count") or "2400")
     title = normalize(row.get("title") or row.get("keyword"))
@@ -250,6 +254,7 @@ def user_prompt(row: dict[str, str], youtube_context: str = "") -> str:
         "blood": "Explain what the reading or marker can mean, what changes interpretation, what patterns matter, and when to seek medical guidance. Avoid diagnosis and self-treatment advice.",
     }
     yt_block = f"\n\nYouTube context:\n{youtube_context}\n" if youtube_context else ""
+    retry_block = f"\n\nCritical repair instructions:\n{extra_instruction}\n" if extra_instruction else ""
     return f"""
 Write a complete CMS-ready Markdown article.
 
@@ -262,7 +267,7 @@ Last updated: {today_label()}
 Target length: about {target} words. Specific and non-repetitive is more important than padding.
 
 Blueprint:
-{blueprint_summary(row)}{yt_block}
+{blueprint_summary(row)}{yt_block}{retry_block}
 
 CMS media requirements:
 - Include exactly one image placeholder in the article body using Markdown: ![Relevant description](image-placeholder.png)
@@ -271,6 +276,8 @@ CMS media requirements:
 Structure requirements:
 - Start with a search-intent hook, not a dictionary definition.
 - Include a section called "The Short Version" within the first 300 words.
+- Include at least 6 substantial H2 sections before the final disclaimer.
+- Include a section called "Frequently Asked Questions" with at least 4 useful questions.
 - Include an "Important Note" disclaimer near the end.
 - Do not manually add a Table of Contents. The system will generate it after writing.
 
@@ -280,6 +287,7 @@ Style requirements:
 - Include a practical protocol/checklist section.
 - Include FAQ using natural questions, not awkward keyword rewrites.
 - Do not use XML-like tags such as <Sequence> or <Step>.
+- Do not use fenced code blocks or ASCII diagrams.
 - Do not use LaTeX syntax such as $\\ge$ or $\\text{{kg/m}}^2$.
 - Do not mention that you are following a blueprint.
 - Do not include code fences.
@@ -289,27 +297,44 @@ Category-specific requirements:
 """.strip()
 
 
-def call_chat_completion(api_key: str, api_base: str, model: str, row: dict[str, str], temperature: float, timeout: int, youtube_context: str = "") -> str:
-    payload = {
+def request_chat_completion(url: str, payload: dict[str, Any], api_key: str, timeout: int) -> str:
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8")
+
+
+def call_chat_completion(api_key: str, api_base: str, model: str, row: dict[str, str], temperature: float, timeout: int, youtube_context: str = "", max_tokens: int = 6500, extra_instruction: str = "") -> str:
+    payload: dict[str, Any] = {
         "model": model,
         "temperature": temperature,
         "messages": [
             {"role": "system", "content": system_prompt(clean_category(row))},
-            {"role": "user", "content": user_prompt(row, youtube_context)},
+            {"role": "user", "content": user_prompt(row, youtube_context, extra_instruction)},
         ],
     }
-    req = urllib.request.Request(
-        chat_completion_url(api_base),
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-        method="POST",
-    )
+    if max_tokens and max_tokens > 0:
+        payload["max_tokens"] = max_tokens
+    url = chat_completion_url(api_base)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8")
+        raw = request_chat_completion(url, payload, api_key, timeout)
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="ignore")
-        raise RuntimeError(f"API HTTP {exc.code}: {body[:800]}") from exc
+        # Some OpenAI-compatible relays reject max_tokens. Retry once without it.
+        if "max_tokens" in body and "max_tokens" in payload:
+            payload.pop("max_tokens", None)
+            try:
+                raw = request_chat_completion(url, payload, api_key, timeout)
+            except urllib.error.HTTPError as retry_exc:
+                retry_body = retry_exc.read().decode("utf-8", errors="ignore")
+                raise RuntimeError(f"API HTTP {retry_exc.code}: {retry_body[:800]}") from retry_exc
+        else:
+            raise RuntimeError(f"API HTTP {exc.code}: {body[:800]}") from exc
     parsed = json.loads(raw)
     try:
         return parsed["choices"][0]["message"]["content"]
@@ -384,6 +409,16 @@ def repeated_paragraph_count(markdown: str) -> int:
     return repeated
 
 
+def likely_truncated(markdown: str) -> bool:
+    body = markdown.strip()
+    if not body:
+        return True
+    if "## Important Note" not in body or "## Frequently Asked" not in body:
+        return True
+    tail = re.sub(r"\s+", " ", body[-500:]).strip()
+    return bool(re.search(r"\b(how|the|and|or|of|to|for|with|than|when)\s*$", tail, flags=re.I))
+
+
 def quality_check(markdown: str, row: dict[str, str], selected_youtube_embed_url: str = "") -> tuple[str, bool, list[str]]:
     notes: list[str] = []
     wc = word_count(markdown)
@@ -400,19 +435,73 @@ def quality_check(markdown: str, row: dict[str, str], selected_youtube_embed_url
             notes.append(f"missing:{required}")
     if selected_youtube_embed_url and selected_youtube_embed_url not in markdown:
         notes.append("missing:selected_youtube_embed_url")
+    if likely_truncated(markdown):
+        notes.append("likely_truncated")
     if re.search(r"\b(guaranteed|miracle cure|cures?|detoxes?|burns fat instantly|clinically proven to cure)\b", markdown, flags=re.I):
         notes.append("unsafe_claim_language")
     if re.search(r"\b(this section should|open with|summarize what|blueprint|provided h2 plan)\b", markdown, flags=re.I):
         notes.append("instruction_leak")
     if re.search(r"<\/?(?:Sequence|Step)\b", markdown, flags=re.I):
         notes.append("xml_step_tag_leak")
-    if re.search(r"\$|\\text\{|\\ge|\\le", markdown):
-        notes.append("latex_leak")
+    if re.search(r"```|\$|\\text\{|\\ge|\\le", markdown):
+        notes.append("formatting_leak")
     repeated = repeated_paragraph_count(markdown)
     if repeated:
         notes.append(f"repeated_paragraphs:{repeated}")
     status = "PASS" if not notes else "REVIEW"
     return status, status == "PASS", notes
+
+
+def should_retry(notes: list[str]) -> bool:
+    critical = ["word_count_below_target", "too_few_h2", "missing:Frequently Asked", "missing:Important Note", "likely_truncated"]
+    note_text = " | ".join(notes)
+    return any(item in note_text for item in critical)
+
+
+def retry_instruction(notes: list[str]) -> str:
+    return (
+        "The previous draft failed quality checks: " + " | ".join(notes) + "\n"
+        "Rewrite the entire article from scratch. Do not continue from the old draft. Make it complete, not truncated. "
+        "Include The Short Version, at least 6 substantial H2 sections, one useful Markdown table, a practical checklist/protocol, Frequently Asked Questions with at least 4 questions, and a final Important Note. "
+        "Do not use code fences, ASCII boxes, XML-like tags, or LaTeX."
+    )
+
+
+def generate_one_article(
+    row: dict[str, str],
+    api_key: str,
+    api_base: str,
+    model: str,
+    temperature: float,
+    timeout: int,
+    max_tokens: int,
+    youtube_context: str,
+    selected_youtube_url: str,
+    selected_youtube_embed_url: str,
+    retries: int,
+) -> tuple[str, str, list[str], bool]:
+    post_notes: list[str] = []
+    raw = call_chat_completion(api_key, api_base, model, row, temperature, timeout, youtube_context, max_tokens)
+    markdown = clean_markdown(raw, row, selected_youtube_url, selected_youtube_embed_url)
+    markdown, post_notes = post_process_markdown(markdown, clean_category(row))
+    quality_status, _, notes = quality_check(markdown, row, selected_youtube_embed_url)
+
+    did_retry = False
+    for attempt in range(retries):
+        if not should_retry(notes):
+            break
+        did_retry = True
+        extra = retry_instruction(notes)
+        raw = call_chat_completion(api_key, api_base, model, row, temperature, timeout, youtube_context, max_tokens, extra_instruction=extra)
+        candidate = clean_markdown(raw, row, selected_youtube_url, selected_youtube_embed_url)
+        candidate, candidate_post_notes = post_process_markdown(candidate, clean_category(row))
+        candidate_status, _, candidate_notes = quality_check(candidate, row, selected_youtube_embed_url)
+        # Keep the retry when it improves status or word count.
+        if candidate_status == "PASS" or word_count(candidate) >= word_count(markdown):
+            markdown = candidate
+            post_notes = candidate_post_notes + [f"retry_{attempt + 1}"]
+            quality_status, notes = candidate_status, candidate_notes
+    return markdown, quality_status, notes + [f"post:{note}" for note in post_notes], did_retry
 
 
 def main() -> int:
@@ -428,7 +517,9 @@ def main() -> int:
     parser.add_argument("--use-youtube-context", action="store_true")
     parser.add_argument("--youtube-max-results", type=int, default=5)
     parser.add_argument("--temperature", type=float, default=float(os.getenv("AI_TEMPERATURE", "0.65")))
-    parser.add_argument("--timeout", type=int, default=int(os.getenv("AI_TIMEOUT", "180")))
+    parser.add_argument("--timeout", type=int, default=int(os.getenv("AI_TIMEOUT", "240")))
+    parser.add_argument("--max-tokens", type=int, default=int(os.getenv("AI_MAX_TOKENS", "6500")), help="Set 0 to omit max_tokens from the request")
+    parser.add_argument("--retries", type=int, default=int(os.getenv("AI_RETRIES", "1")))
     parser.add_argument("--sleep", type=float, default=float(os.getenv("AI_SLEEP", "0.5")))
     parser.add_argument("--max-articles", type=int, default=int(os.getenv("AI_MAX_ARTICLES", "0")), help="0 means all")
     parser.add_argument("--overwrite", action="store_true")
@@ -469,11 +560,20 @@ def main() -> int:
         yt_results: list[dict[str, str]] = []
         selected_youtube_url = ""
         selected_youtube_embed_url = ""
-        post_notes: list[str] = []
+        markdown = ""
+        notes: list[str] = []
+        quality_status = "ERROR"
+        publish_ready = False
+        wc = 0
 
         if path.exists() and not args.overwrite:
             markdown = path.read_text(encoding="utf-8", errors="ignore")
             generation_status = "skipped_existing"
+            markdown, post_notes = post_process_markdown(markdown, clean_category(row))
+            notes = [f"post:{note}" for note in post_notes]
+            quality_status, publish_ready, quality_notes = quality_check(markdown, row, selected_youtube_embed_url)
+            notes = quality_notes + notes
+            wc = word_count(markdown)
         else:
             try:
                 print(f"[{idx}/{len(source_rows)}] Generating: {title}")
@@ -484,23 +584,25 @@ def main() -> int:
                     youtube_context = youtube_context_text(yt_results)
                     selected_youtube_url = yt_results[0].get("url", "") if yt_results else ""
                     selected_youtube_embed_url = yt_results[0].get("embed_url", "") if yt_results else ""
-                raw = call_chat_completion(api_key, api_base, model, row, args.temperature, args.timeout, youtube_context)
-                markdown = clean_markdown(raw, row, selected_youtube_url, selected_youtube_embed_url)
+                markdown, quality_status, notes, did_retry = generate_one_article(
+                    row, api_key, api_base, model, args.temperature, args.timeout, args.max_tokens,
+                    youtube_context, selected_youtube_url, selected_youtube_embed_url, max(0, args.retries)
+                )
+                publish_ready = quality_status == "PASS"
+                wc = word_count(markdown)
+                if did_retry:
+                    generation_status = "generated_with_retry"
                 time.sleep(args.sleep)
             except Exception as exc:  # noqa: BLE001
                 markdown = ""
                 generation_status = "error"
                 error_message = str(exc)[:1200]
+                notes = [error_message]
+                quality_status, publish_ready, wc = "ERROR", False, 0
 
         if markdown:
-            markdown, post_notes = post_process_markdown(markdown, clean_category(row))
             path.write_text(markdown, encoding="utf-8")
             write_preview_html(markdown, preview_path)
-            quality_status, publish_ready, notes = quality_check(markdown, row, selected_youtube_embed_url)
-            notes.extend(f"post:{note}" for note in post_notes)
-            wc = word_count(markdown)
-        else:
-            quality_status, publish_ready, notes, wc = "ERROR", False, [error_message], 0
 
         queue_rows.append({
             "category": clean_category(row),
@@ -528,6 +630,8 @@ def main() -> int:
     errors = sum(1 for row in queue_rows if row["quality_status"] == "ERROR")
     print(f"Model: {model}")
     print(f"API base: {api_base}")
+    print(f"Max tokens: {args.max_tokens if args.max_tokens > 0 else 'omitted'}")
+    print(f"Retries: {args.retries}")
     print(f"YouTube context: {'on' if args.use_youtube_context and youtube_api_key else 'off'}")
     print(f"Wrote {len(queue_rows)} queue rows to {args.queue_output}")
     print(f"Articles directory: {article_dir}")
