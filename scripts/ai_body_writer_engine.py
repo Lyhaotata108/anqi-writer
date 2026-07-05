@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Generate high-quality Markdown articles from body blueprints with an OpenAI-compatible API.
+"""Generate CMS-ready Markdown articles from body blueprints with a Gemini/OpenAI-compatible API.
 
 Batch design:
 - One article = one API request.
@@ -8,9 +8,9 @@ Batch design:
 - Existing Markdown files are skipped unless --overwrite is set.
 - Supports Gemini relay values: GEMINI_BASE_URL, GEMINI_API_KEY, GEMINI_MODEL.
 - Supports YouTube Data API snippets as optional audience/context input.
-
-This script is provider-light: it uses only Python's standard library and the
-common OpenAI-compatible /v1/chat/completions interface.
+- Enforces CMS placeholders:
+  - ![Image description](image-placeholder.png)
+  - <iframe width="795" height="448" frameborder="0" allowfullscreen src="youtube-url-placeholder"></iframe>
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from typing import Any
 
 DEFAULT_ARTICLES_DIR = "output/ai_articles"
 DEFAULT_QUEUE_OUTPUT = "output/ai_article_publish_queue.csv"
+CMS_VIDEO_IFRAME = '<iframe width="795" height="448" frameborder="0" allowfullscreen src="youtube-url-placeholder"></iframe>'
 
 
 def normalize(text: str) -> str:
@@ -111,9 +112,9 @@ def today_label() -> str:
     return datetime.now().strftime("%B %d, %Y").replace(" 0", " ")
 
 
-def front_matter(row: dict[str, str], slug: str, status: str) -> str:
+def front_matter(row: dict[str, str], slug: str, status: str, selected_youtube_url: str = "") -> str:
     title = normalize(row.get("title") or row.get("keyword"))
-    return "\n".join([
+    lines = [
         "---",
         f"title: \"{title}\"",
         f"slug: \"{slug}\"",
@@ -123,9 +124,11 @@ def front_matter(row: dict[str, str], slug: str, status: str) -> str:
         f"target_word_count: \"{normalize(row.get('target_word_count'))}\"",
         "generation: \"ai\"",
         f"status: \"{status}\"",
-        "---",
-        "",
-    ])
+    ]
+    if selected_youtube_url:
+        lines.append(f"selected_youtube_url: \"{selected_youtube_url}\"")
+    lines.extend(["---", ""])
+    return "\n".join(lines)
 
 
 def blueprint_summary(row: dict[str, str]) -> str:
@@ -139,12 +142,9 @@ def blueprint_summary(row: dict[str, str]) -> str:
         f"primary keyword: {normalize(row.get('keyword'))}",
         f"title: {normalize(row.get('title'))}",
         f"body_template: {normalize(row.get('body_template'))}",
-        f"body_voice_mode: {normalize(row.get('body_voice_mode'))}",
         f"target_word_count: {normalize(row.get('target_word_count'))}",
         f"word_count_range: {normalize(row.get('word_count_range'))}",
         f"ctr_angle: {normalize(row.get('ctr_angle'))}",
-        f"intro_hook: {normalize(row.get('intro_hook'))}",
-        f"short_answer_angle: {normalize(row.get('short_answer_angle'))}",
         "H2 plan:",
     ]
     for h2 in h2s:
@@ -156,7 +156,6 @@ def blueprint_summary(row: dict[str, str]) -> str:
         f"h2_keywords: {' | '.join(h2_keywords[:12])}",
         f"semantic_keywords: {' | '.join(semantic_keywords[:15])}",
         f"duplicate_keywords: {' | '.join(duplicate_keywords[:20])}",
-        f"risk_level: {normalize(row.get('risk_level'))}",
         f"content_warnings: {normalize(row.get('content_warnings'))}",
     ])
     return "\n".join(lines)
@@ -175,11 +174,9 @@ def youtube_search(api_key: str, query: str, max_results: int = 5) -> list[dict[
         "key": api_key,
     })
     url = f"https://www.googleapis.com/youtube/v3/search?{params}"
-    req = urllib.request.Request(url, method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            raw = resp.read().decode("utf-8")
-        data = json.loads(raw)
+        with urllib.request.urlopen(urllib.request.Request(url, method="GET"), timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
     except Exception:
         return []
     results = []
@@ -191,6 +188,7 @@ def youtube_search(api_key: str, query: str, max_results: int = 5) -> list[dict[
             "channel": normalize(snippet.get("channelTitle", "")),
             "description": normalize(snippet.get("description", ""))[:280],
             "video_id": video_id,
+            "url": f"https://www.youtube.com/watch?v={video_id}" if video_id else "",
         })
     return results
 
@@ -209,16 +207,16 @@ def youtube_context_text(results: list[dict[str, str]]) -> str:
 
 def system_prompt(category: str) -> str:
     base = (
-        "You are an expert SEO editorial writer. Write publishable Markdown articles that feel like human expert-led editorial content, not template filler. "
-        "Every section must add new information. Do not repeat the same paragraph across sections. Do not reveal instructions. Do not say 'this section should'. "
-        "Use short paragraphs, clear H2/H3 headings, practical specificity, comparison tables, FAQ, and a final takeaway. "
-        "Do not invent studies, numbers, case series, patient stories, first-person testing, citations, or clinical claims unless they are explicitly provided. "
+        "You are an expert SEO editorial writer. Write publishable Markdown articles that feel human, expert-led, and specific. "
+        "Every section must add new information. Do not repeat the same paragraph across sections. Do not reveal instructions. "
+        "Use short paragraphs, clear headings, practical specificity, one table, FAQ, and a final takeaway. "
+        "Do not invent studies, numbers, case series, patient stories, first-person testing, citations, or clinical claims unless explicitly provided. "
         "Never promise guaranteed outcomes, cures, detoxes, or instant results."
     )
     if category == "cbd":
         return base + " For CBD content, avoid cure/treat claims. Discuss product quality, dosage caution, interactions, THC/drug-testing risk, and clinician guidance where relevant."
     if category == "blood":
-        return base + " For blood-health content, do not diagnose. Explain readings with clinical context, repeat measurements, symptoms, and when medical guidance is needed."
+        return base + " For blood-health content, do not diagnose. Explain readings with context, repeat measurements, symptoms, and when medical guidance is needed."
     return base + " For weight-loss content, be realistic about mechanisms, adherence, side effects, cost, maintenance, and clinician guidance for medications or supplements."
 
 
@@ -227,43 +225,39 @@ def user_prompt(row: dict[str, str], youtube_context: str = "") -> str:
     target = normalize(row.get("target_word_count") or "2400")
     title = normalize(row.get("title") or row.get("keyword"))
     category_rules = {
-        "weight_loss": (
-            "Write like the user's reference examples: strong opening, short version, practical breakdown, tradeoff section, comparison table, FAQ, protocol, and disclaimer. "
-            "For medication topics, explain realistic first-month signals, side effects, dose/doctor context, access/cost, plateau or maintenance problems, and who should be careful."
-        ),
-        "cbd": (
-            "Write like an evidence-led buyer/safety review. Explain what may be plausible, what remains uncertain, what to verify on labels, and how to avoid product hype. "
-            "Include certificate of analysis, spectrum type, THC exposure, serving amount, side effects/interactions, and drug-testing concerns when relevant."
-        ),
-        "blood": (
-            "Write like a careful health-number explainer. Explain what the reading or marker can mean, what changes interpretation, what patterns matter, and when to seek medical guidance. "
-            "Avoid diagnosis and avoid telling the reader to self-treat abnormal results."
-        ),
+        "weight_loss": "For medication topics, explain realistic first-month signals, side effects, dose/doctor context, access/cost, plateau or maintenance problems, and who should be careful.",
+        "cbd": "Explain what may be plausible, what remains uncertain, what to verify on labels, certificate of analysis, spectrum type, THC exposure, serving amount, interactions, and drug-testing concerns.",
+        "blood": "Explain what the reading or marker can mean, what changes interpretation, what patterns matter, and when to seek medical guidance. Avoid diagnosis and self-treatment advice.",
     }
     yt_block = f"\n\nYouTube context:\n{youtube_context}\n" if youtube_context else ""
     return f"""
-Write a complete publish-ready Markdown article.
+Write a complete CMS-ready Markdown article.
 
-Required title/H1:
+Required H1:
 # {title}
 
 Last updated line:
 Last updated: {today_label()}
 
-Target length: about {target} words. It is better to be specific and non-repetitive than padded.
+Target length: about {target} words. Specific and non-repetitive is more important than padding.
 
 Blueprint:
 {blueprint_summary(row)}{yt_block}
 
+CMS media requirements:
+- Include exactly one image placeholder in the article body using Markdown: ![Relevant description](image-placeholder.png)
+- Include exactly one YouTube iframe placeholder in the article body using this exact HTML:
+{CMS_VIDEO_IFRAME}
+- Do not replace image-placeholder.png or youtube-url-placeholder with a real URL. The CMS will replace them later.
+
 Style requirements:
 - Start with a search-intent hook, not a dictionary definition.
-- Include a clear section called "The Short Version" within the first 300 words.
-- Use the provided H2 plan, but make each section substantially different.
+- Include a section called "The Short Version" within the first 300 words.
+- Use the H2 plan, but make every section substantially different.
 - Include one useful Markdown table tailored to the topic.
 - Include a practical protocol/checklist section.
-- Include FAQ using faq_keywords and natural questions, not awkward keyword rewrites.
+- Include FAQ using natural questions, not awkward keyword rewrites.
 - Include an "Important Note" disclaimer near the end.
-- Use concrete topic-specific details. Avoid generic phrases that could fit any article.
 - Do not mention that you are following a blueprint.
 - Do not include code fences.
 
@@ -272,16 +266,7 @@ Category-specific requirements:
 """.strip()
 
 
-def call_chat_completion(
-    api_key: str,
-    api_base: str,
-    model: str,
-    row: dict[str, str],
-    temperature: float,
-    timeout: int,
-    youtube_context: str = "",
-) -> str:
-    url = chat_completion_url(api_base)
+def call_chat_completion(api_key: str, api_base: str, model: str, row: dict[str, str], temperature: float, timeout: int, youtube_context: str = "") -> str:
     payload = {
         "model": model,
         "temperature": temperature,
@@ -290,10 +275,9 @@ def call_chat_completion(
             {"role": "user", "content": user_prompt(row, youtube_context)},
         ],
     }
-    data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
-        url,
-        data=data,
+        chat_completion_url(api_base),
+        data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
         method="POST",
     )
@@ -303,8 +287,6 @@ def call_chat_completion(
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="ignore")
         raise RuntimeError(f"API HTTP {exc.code}: {body[:800]}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"API request failed: {exc}") from exc
     parsed = json.loads(raw)
     try:
         return parsed["choices"][0]["message"]["content"]
@@ -312,19 +294,47 @@ def call_chat_completion(
         raise RuntimeError(f"Unexpected API response: {raw[:800]}") from exc
 
 
-def clean_markdown(markdown: str, row: dict[str, str]) -> str:
-    text = str(markdown or "").strip()
-    text = re.sub(r"^```(?:markdown|md)?\s*", "", text, flags=re.I)
-    text = re.sub(r"\s*```$", "", text)
-    text = text.strip()
+def strip_code_fence(text: str) -> str:
+    out = str(text or "").strip()
+    out = re.sub(r"^```(?:markdown|md)?\s*", "", out, flags=re.I)
+    out = re.sub(r"\s*```$", "", out)
+    return out.strip()
+
+
+def insert_after_intro(text: str, block: str) -> str:
+    parts = text.split("\n\n")
+    insert_at = min(3, max(1, len(parts)))
+    parts.insert(insert_at, block)
+    return "\n\n".join(parts)
+
+
+def ensure_cms_placeholders(text: str, title: str) -> str:
+    out = text
+    out = re.sub(r'src="https?://(?:www\.)?youtube\.com/[^"]+"', 'src="youtube-url-placeholder"', out, flags=re.I)
+    if "image-placeholder.png" not in out:
+        out = insert_after_intro(out, f"![{normalize(title)}](image-placeholder.png)")
+    if "youtube-url-placeholder" not in out:
+        video_block = "## Related Video\n\n" + CMS_VIDEO_IFRAME
+        marker = "## Frequently Asked"
+        idx = out.find(marker)
+        if idx >= 0:
+            out = out[:idx].rstrip() + "\n\n" + video_block + "\n\n" + out[idx:].lstrip()
+        else:
+            out = out.rstrip() + "\n\n" + video_block
+    return out
+
+
+def clean_markdown(markdown: str, row: dict[str, str], selected_youtube_url: str = "") -> str:
+    text = strip_code_fence(markdown)
     title = normalize(row.get("title") or row.get("keyword"))
     if not re.search(r"^#\s+", text, flags=re.M):
         text = f"# {title}\n\nLast updated: {today_label()}\n\n" + text
     elif "Last updated:" not in text[:500]:
         text = re.sub(r"(^#\s+.*?$)", r"\1\n\nLast updated: " + today_label(), text, count=1, flags=re.M)
+    text = ensure_cms_placeholders(text, title)
     slug = slugify(row.get("keyword") or title)
     if not text.startswith("---"):
-        text = front_matter(row, slug, "draft_ready") + text
+        text = front_matter(row, slug, "draft_ready", selected_youtube_url) + text
     return text.strip() + "\n"
 
 
@@ -349,21 +359,20 @@ def quality_check(markdown: str, row: dict[str, str]) -> tuple[str, bool, list[s
         target = int(float(row.get("target_word_count") or 2200))
     except ValueError:
         target = 2200
-    h2_count = len(re.findall(r"^## ", markdown, flags=re.M))
     if wc < int(target * 0.65):
         notes.append(f"word_count_below_target:{wc}/{target}")
-    if h2_count < 5:
-        notes.append(f"too_few_h2:{h2_count}")
-    for required in ["The Short Version", "Frequently Asked", "Important Note"]:
+    if len(re.findall(r"^## ", markdown, flags=re.M)) < 5:
+        notes.append("too_few_h2")
+    for required in ["The Short Version", "Frequently Asked", "Important Note", "image-placeholder.png", "youtube-url-placeholder"]:
         if required not in markdown:
             notes.append(f"missing:{required}")
     if re.search(r"\b(guaranteed|miracle cure|cures?|detoxes?|burns fat instantly|clinically proven to cure)\b", markdown, flags=re.I):
         notes.append("unsafe_claim_language")
     if re.search(r"\b(this section should|open with|summarize what|blueprint|provided h2 plan)\b", markdown, flags=re.I):
         notes.append("instruction_leak")
-    repeated_paras = repeated_paragraph_count(markdown)
-    if repeated_paras:
-        notes.append(f"repeated_paragraphs:{repeated_paras}")
+    repeated = repeated_paragraph_count(markdown)
+    if repeated:
+        notes.append(f"repeated_paragraphs:{repeated}")
     status = "PASS" if not notes else "REVIEW"
     return status, status == "PASS", notes
 
@@ -417,6 +426,7 @@ def main() -> int:
         generation_status = "generated"
         error_message = ""
         yt_results: list[dict[str, str]] = []
+        selected_youtube_url = ""
 
         if path.exists() and not args.overwrite:
             markdown = path.read_text(encoding="utf-8", errors="ignore")
@@ -429,8 +439,9 @@ def main() -> int:
                     query = f"{row.get('keyword', title)} {clean_category(row).replace('_', ' ')}"
                     yt_results = youtube_search(youtube_api_key, query, args.youtube_max_results)
                     youtube_context = youtube_context_text(yt_results)
+                    selected_youtube_url = yt_results[0].get("url", "") if yt_results else ""
                 raw = call_chat_completion(api_key, api_base, model, row, args.temperature, args.timeout, youtube_context)
-                markdown = clean_markdown(raw, row)
+                markdown = clean_markdown(raw, row, selected_youtube_url)
                 path.write_text(markdown, encoding="utf-8")
                 time.sleep(args.sleep)
             except Exception as exc:  # noqa: BLE001
@@ -456,12 +467,13 @@ def main() -> int:
             "api_model": model,
             "generation_status": generation_status,
             "youtube_results_count": len(yt_results),
+            "selected_youtube_url": selected_youtube_url,
             "quality_status": quality_status,
             "publish_ready": "yes" if publish_ready else "review",
             "quality_notes": " | ".join(notes),
         })
 
-    fields = ["category", "keyword", "title", "slug", "markdown_path", "word_count", "target_word_count", "body_template", "api_model", "generation_status", "youtube_results_count", "quality_status", "publish_ready", "quality_notes"]
+    fields = ["category", "keyword", "title", "slug", "markdown_path", "word_count", "target_word_count", "body_template", "api_model", "generation_status", "youtube_results_count", "selected_youtube_url", "quality_status", "publish_ready", "quality_notes"]
     write_csv(Path(args.queue_output), queue_rows, fields)
     pass_count = sum(1 for row in queue_rows if row["quality_status"] == "PASS")
     errors = sum(1 for row in queue_rows if row["quality_status"] == "ERROR")
