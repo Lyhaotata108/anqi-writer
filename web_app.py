@@ -13,6 +13,7 @@ import time
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 ROOT = Path(__file__).resolve().parent
 OUTPUT_DIR = ROOT / "output"
@@ -143,7 +144,7 @@ def run_pipeline(keywords: list[str], run_name: str, category: str, use_ai: bool
         if overwrite:
             cmd.append("--overwrite")
         ok, output = run_command(cmd)
-        logs.append(("Gemini完整正文", ok, output))
+        logs.append(("Gemini完整正文 + HTML预览", ok, output))
     else:
         ok, output = run_command([sys.executable, "scripts/body_writer_engine.py", str(paths["body_blueprint"]), "--articles-dir", str(paths["articles_dir"]), "--queue-output", str(paths["publish_queue"])])
         logs.append(("模板完整正文", ok, output))
@@ -194,14 +195,29 @@ def show_article_preview(paths: dict[str, Path]) -> None:
     if publish.empty or "markdown_path" not in publish.columns:
         st.info("暂时没有生成 Markdown 正文。")
         return
-    cols = [c for c in ["keyword", "title", "word_count", "api_model", "generation_status", "youtube_results_count", "quality_status", "publish_ready", "markdown_path"] if c in publish.columns]
+    cols = [c for c in ["keyword", "title", "word_count", "api_model", "generation_status", "youtube_results_count", "quality_status", "publish_ready", "markdown_path", "preview_html_path"] if c in publish.columns]
     st.dataframe(publish[cols], use_container_width=True, height=300)
-    selected = st.selectbox("预览 Markdown 正文", publish["markdown_path"].astype(str).tolist())
-    path = Path(selected)
-    if path.exists():
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        st.download_button("下载当前 Markdown", text.encode("utf-8"), file_name=path.name, mime="text/markdown", use_container_width=True)
-        st.markdown(text[:30000])
+    article_options = publish["markdown_path"].astype(str).tolist()
+    selected = st.selectbox("选择文章", article_options)
+    md_path = Path(selected)
+    row = publish[publish["markdown_path"].astype(str) == selected].iloc[0].to_dict()
+    html_path = Path(str(row.get("preview_html_path", "")))
+
+    preview_tab, markdown_tab = st.tabs(["HTML 预览", "Markdown 源码"])
+    with preview_tab:
+        if html_path.exists():
+            html_text = html_path.read_text(encoding="utf-8", errors="ignore")
+            st.download_button("下载当前 HTML 预览", html_text.encode("utf-8"), file_name=html_path.name, mime="text/html", use_container_width=True)
+            components.html(html_text, height=900, scrolling=True)
+        else:
+            st.warning("没有找到 HTML 预览文件。请用最新版本重新生成文章。")
+    with markdown_tab:
+        if md_path.exists():
+            text = md_path.read_text(encoding="utf-8", errors="ignore")
+            st.download_button("下载当前 Markdown", text.encode("utf-8"), file_name=md_path.name, mime="text/markdown", use_container_width=True)
+            st.markdown(text[:30000])
+        else:
+            st.warning("没有找到 Markdown 文件。")
 
 
 ensure_dirs()
@@ -212,7 +228,7 @@ model_name = cfg_value(config, ["GEMINI_MODEL", "OPENAI_MODEL"], "gemini-3-flash
 base_url = cfg_value(config, ["GEMINI_BASE_URL", "OPENAI_BASE_URL"], "")
 
 st.title("Anqi Writer SEO Pipeline")
-st.caption("支持 Weight Loss / CBD / Blood 同时跑：关键词聚类 → 标题 → 正文蓝图 → Gemini/模板 Markdown 正文。")
+st.caption("支持 Weight Loss / CBD / Blood 同时跑：关键词聚类 → 标题 → 正文蓝图 → Gemini 正文 → Markdown + HTML 预览。")
 
 with st.sidebar:
     st.header("运行设置")
@@ -290,7 +306,7 @@ else:
             with d3: csv_download(paths["title_audit"], "下载标题审计 CSV")
             with d4: csv_download(paths["body_blueprint"], "下载正文蓝图 CSV")
             with d5: csv_download(paths["publish_queue"], "下载发布队列 CSV")
-            tab1, tab2, tab3, tab4, tab5 = st.tabs(["关键词聚类", "主文章队列", "标题审计", "正文蓝图", "完整正文"])
+            tab1, tab2, tab3, tab4, tab5 = st.tabs(["关键词聚类", "主文章队列", "标题审计", "正文蓝图", "完整正文 / HTML预览"])
             with tab1: show_table("关键词聚类审计", paths["cluster_audit"], ["category", "keyword", "publish_role", "merge_usage", "primary_keyword", "cluster_size", "keyword_score", "score_reason"])
             with tab2: show_table("主文章队列", paths["primary_queue"], ["category", "primary_keyword", "cluster_size", "canonical_subject", "intent_family", "secondary_keywords", "faq_keywords", "h2_keywords"])
             with tab3: show_table("标题审计", paths["title_audit"], ["category", "keyword", "title", "title_shape", "ctr_angle", "title_score", "secondary_keywords", "faq_keywords", "h2_keywords"])
