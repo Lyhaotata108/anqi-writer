@@ -15,6 +15,9 @@ Post-processing rule:
 Reliability rule:
 - Use a higher max token budget by default.
 - Retry incomplete articles once when FAQ/H2/word-count checks fail.
+
+CMS import rule:
+- When --cms-import-after-each is enabled, each article is written, previewed, added to the queue, then immediately dry-run/imported before the next article is generated.
 """
 
 from __future__ import annotations
@@ -32,9 +35,20 @@ import urllib.request
 from typing import Any
 
 from article_post_processor import post_process_markdown, write_preview_html
+from cms_importer import (
+    DEFAULT_BASE_URL as CMS_DEFAULT_BASE_URL,
+    DEFAULT_IMPORT_TOKEN as CMS_DEFAULT_IMPORT_TOKEN,
+    build_payload as cms_build_payload,
+    first_value as cms_first_value,
+    has_real_youtube as cms_has_real_youtube,
+    import_url as cms_import_url,
+    load_config as cms_load_config,
+    post_json as cms_post_json,
+)
 
 DEFAULT_ARTICLES_DIR = "output/ai_articles"
 DEFAULT_QUEUE_OUTPUT = "output/ai_article_publish_queue.csv"
+DEFAULT_CMS_OUTPUT = "output/cms_import_results.csv"
 
 
 def normalize(text: str) -> str:
@@ -325,7 +339,6 @@ def call_chat_completion(api_key: str, api_base: str, model: str, row: dict[str,
         raw = request_chat_completion(url, payload, api_key, timeout)
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="ignore")
-        # Some OpenAI-compatible relays reject max_tokens. Retry once without it.
         if "max_tokens" in body and "max_tokens" in payload:
             payload.pop("max_tokens", None)
             try:
@@ -485,23 +498,57 @@ def generate_one_article(
     markdown = clean_markdown(raw, row, selected_youtube_url, selected_youtube_embed_url)
     markdown, post_notes = post_process_markdown(markdown, clean_category(row))
     quality_status, _, notes = quality_check(markdown, row, selected_youtube_embed_url)
-
     did_retry = False
     for attempt in range(retries):
         if not should_retry(notes):
             break
         did_retry = True
-        extra = retry_instruction(notes)
-        raw = call_chat_completion(api_key, api_base, model, row, temperature, timeout, youtube_context, max_tokens, extra_instruction=extra)
+        raw = call_chat_completion(api_key, api_base, model, row, temperature, timeout, youtube_context, max_tokens, extra_instruction=retry_instruction(notes))
         candidate = clean_markdown(raw, row, selected_youtube_url, selected_youtube_embed_url)
         candidate, candidate_post_notes = post_process_markdown(candidate, clean_category(row))
         candidate_status, _, candidate_notes = quality_check(candidate, row, selected_youtube_embed_url)
-        # Keep the retry when it improves status or word count.
         if candidate_status == "PASS" or word_count(candidate) >= word_count(markdown):
             markdown = candidate
             post_notes = candidate_post_notes + [f"retry_{attempt + 1}"]
             quality_status, notes = candidate_status, candidate_notes
     return markdown, quality_status, notes + [f"post:{note}" for note in post_notes], did_retry
+
+
+def cms_config(config_path: str) -> tuple[str, str]:
+    config = cms_load_config(config_path)
+    if not config and config_path == "local_api_keys.json":
+        config = cms_load_config("scripts/local_api_keys.json")
+    base_url = cms_first_value("", ["CMS_IMPORT_BASE_URL", "ANQICMS_IMPORT_BASE_URL"], config, ["CMS_IMPORT_BASE_URL", "ANQICMS_IMPORT_BASE_URL"], CMS_DEFAULT_BASE_URL)
+    token = cms_first_value("", ["CMS_IMPORT_TOKEN", "ANQICMS_IMPORT_TOKEN"], config, ["CMS_IMPORT_TOKEN", "ANQICMS_IMPORT_TOKEN"], CMS_DEFAULT_IMPORT_TOKEN)
+    return base_url, token
+
+
+def cms_import_one(row: dict[str, Any], config_path: str, publish: bool, only_ready: bool, category_id: int) -> dict[str, Any]:
+    title = normalize(row.get("title") or row.get("keyword"))
+    if only_ready and not (str(row.get("publish_ready", "")).lower() == "yes" and str(row.get("quality_status", "")).upper() == "PASS"):
+        return {"title": title, "status": "skipped_not_ready", "cms_id": "", "message": "publish_ready/quality_status not PASS"}
+    try:
+        payload, content = cms_build_payload({str(k): str(v) for k, v in row.items()}, int(category_id or 0))
+    except Exception as exc:  # noqa: BLE001
+        return {"title": title, "status": "error", "cms_id": "", "message": str(exc)[:500]}
+    if not payload.get("keyword_id") and not payload.get("category_id"):
+        return {"title": title, "status": "error", "cms_id": "", "message": "missing keyword_id/category_id"}
+    if not publish:
+        video_mode = "real_youtube" if cms_has_real_youtube(content) else "cms_fallback_video"
+        id_mode = f"keyword_id={payload.get('keyword_id')}" if payload.get("keyword_id") else f"category_id={payload.get('category_id')}"
+        message = json.dumps({"payload_preview": payload, "video_mode": video_mode, "id_mode": id_mode}, ensure_ascii=False)[:1000]
+        return {"title": title, "status": "dry_run", "cms_id": "", "message": message}
+    try:
+        base_url, token = cms_config(config_path)
+        response = cms_post_json(cms_import_url(base_url, token), payload)
+        ok = int(response.get("code", 0)) == 200
+        cms_id = response.get("data", {}).get("id", "") if isinstance(response.get("data"), dict) else ""
+        return {"title": title, "status": "success" if ok else "error", "cms_id": cms_id, "message": response.get("msg", json.dumps(response, ensure_ascii=False))}
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="ignore")
+        return {"title": title, "status": "error", "cms_id": "", "message": f"HTTP {exc.code}: {body[:500]}"}
+    except Exception as exc:  # noqa: BLE001
+        return {"title": title, "status": "error", "cms_id": "", "message": str(exc)[:500]}
 
 
 def main() -> int:
@@ -523,6 +570,11 @@ def main() -> int:
     parser.add_argument("--sleep", type=float, default=float(os.getenv("AI_SLEEP", "0.5")))
     parser.add_argument("--max-articles", type=int, default=int(os.getenv("AI_MAX_ARTICLES", "0")), help="0 means all")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--cms-import-after-each", action="store_true", help="Import/dry-run each article immediately after it is generated")
+    parser.add_argument("--cms-publish", action="store_true", help="Actually POST each generated article to CMS. Without this, per-article CMS import is dry-run")
+    parser.add_argument("--cms-only-publish-ready", action="store_true", help="Only import rows with publish_ready=yes and quality_status=PASS")
+    parser.add_argument("--cms-category-id", type=int, default=0, help="Override category_id for CMS import; 0 uses fixed mapping")
+    parser.add_argument("--cms-output", default=DEFAULT_CMS_OUTPUT)
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -549,14 +601,17 @@ def main() -> int:
     if args.max_articles and args.max_articles > 0:
         source_rows = source_rows[: args.max_articles]
 
+    queue_fields = ["category", "keyword", "title", "slug", "markdown_path", "preview_html_path", "word_count", "target_word_count", "body_template", "api_model", "generation_status", "youtube_results_count", "selected_youtube_url", "selected_youtube_embed_url", "quality_status", "publish_ready", "quality_notes"]
+    cms_fields = ["title", "status", "cms_id", "message"]
     queue_rows: list[dict[str, Any]] = []
+    cms_rows: list[dict[str, Any]] = []
+
     for idx, row in enumerate(source_rows, start=1):
         title = normalize(row.get("title") or row.get("keyword") or "Article")
         slug = slugify(row.get("keyword") or title)
         path = article_dir / f"{slug}.md"
         preview_path = preview_dir / f"{slug}.html"
         generation_status = "generated"
-        error_message = ""
         yt_results: list[dict[str, str]] = []
         selected_youtube_url = ""
         selected_youtube_embed_url = ""
@@ -570,9 +625,8 @@ def main() -> int:
             markdown = path.read_text(encoding="utf-8", errors="ignore")
             generation_status = "skipped_existing"
             markdown, post_notes = post_process_markdown(markdown, clean_category(row))
-            notes = [f"post:{note}" for note in post_notes]
             quality_status, publish_ready, quality_notes = quality_check(markdown, row, selected_youtube_embed_url)
-            notes = quality_notes + notes
+            notes = quality_notes + [f"post:{note}" for note in post_notes]
             wc = word_count(markdown)
         else:
             try:
@@ -596,15 +650,14 @@ def main() -> int:
             except Exception as exc:  # noqa: BLE001
                 markdown = ""
                 generation_status = "error"
-                error_message = str(exc)[:1200]
-                notes = [error_message]
+                notes = [str(exc)[:1200]]
                 quality_status, publish_ready, wc = "ERROR", False, 0
 
         if markdown:
             path.write_text(markdown, encoding="utf-8")
             write_preview_html(markdown, preview_path)
 
-        queue_rows.append({
+        queue_row = {
             "category": clean_category(row),
             "keyword": row.get("keyword", ""),
             "title": title,
@@ -622,10 +675,17 @@ def main() -> int:
             "quality_status": quality_status,
             "publish_ready": "yes" if publish_ready else "review",
             "quality_notes": " | ".join(notes),
-        })
+        }
+        queue_rows.append(queue_row)
+        write_csv(Path(args.queue_output), queue_rows, queue_fields)
 
-    fields = ["category", "keyword", "title", "slug", "markdown_path", "preview_html_path", "word_count", "target_word_count", "body_template", "api_model", "generation_status", "youtube_results_count", "selected_youtube_url", "selected_youtube_embed_url", "quality_status", "publish_ready", "quality_notes"]
-    write_csv(Path(args.queue_output), queue_rows, fields)
+        if args.cms_import_after_each:
+            cms_result = cms_import_one(queue_row, args.config, bool(args.cms_publish), bool(args.cms_only_publish_ready), int(args.cms_category_id or 0))
+            cms_rows.append(cms_result)
+            write_csv(Path(args.cms_output), cms_rows, cms_fields)
+            print(f"[{idx}/{len(source_rows)}] CMS {'publish' if args.cms_publish else 'dry-run'}: {cms_result['status']} {title}")
+
+    write_csv(Path(args.queue_output), queue_rows, queue_fields)
     pass_count = sum(1 for row in queue_rows if row["quality_status"] == "PASS")
     errors = sum(1 for row in queue_rows if row["quality_status"] == "ERROR")
     print(f"Model: {model}")
@@ -634,6 +694,8 @@ def main() -> int:
     print(f"Retries: {args.retries}")
     print(f"YouTube context: {'on' if args.use_youtube_context and youtube_api_key else 'off'}")
     print(f"Wrote {len(queue_rows)} queue rows to {args.queue_output}")
+    if args.cms_import_after_each:
+        print(f"CMS per-article results: {args.cms_output}")
     print(f"Articles directory: {article_dir}")
     print(f"HTML previews directory: {preview_dir}")
     print(f"Quality: {pass_count} PASS · {len(queue_rows) - pass_count - errors} REVIEW · {errors} ERROR")
