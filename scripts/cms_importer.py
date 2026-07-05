@@ -2,15 +2,13 @@
 # -*- coding: utf-8 -*-
 """Publish generated Markdown articles to the CMS import API.
 
-Input: article_publish_queue.csv from the writer.
-Output: cms_import_results.csv.
+Video rule:
+- Preserve a real YouTube iframe/link if the article already has one.
+- If queue row has selected_youtube_embed_url, insert that real iframe.
+- If no real YouTube URL exists, do not insert a placeholder. The CMS can fall back to its keyword-library video.
 
-The CMS expects:
-- title: string
-- content: Markdown string
-- keyword_id or category_id
-- keywords: comma separated tags
-- description: optional summary
+Image rule:
+- Ensure image-placeholder.png exists so the CMS can replace it later.
 """
 
 from __future__ import annotations
@@ -93,17 +91,47 @@ def strip_front_matter(markdown: str) -> str:
     return re.sub(r"^---\s*\n.*?\n---\s*\n", "", text, flags=re.S).strip()
 
 
-def ensure_cms_placeholders(markdown: str, title: str) -> str:
+def youtube_embed_from_url(url: str) -> str:
+    raw = normalize(url)
+    if not raw or "youtube-url-placeholder" in raw:
+        return ""
+    if "/embed/" in raw:
+        return raw
+    patterns = [r"youtube\.com/watch\?v=([^&\s]+)", r"youtu\.be/([^?&\s]+)", r"youtube\.com/shorts/([^?&\s]+)"]
+    for pattern in patterns:
+        match = re.search(pattern, raw, flags=re.I)
+        if match:
+            return f"https://www.youtube.com/embed/{match.group(1)}"
+    return raw if "youtube.com" in raw else ""
+
+
+def has_real_youtube(text: str) -> bool:
+    return bool(re.search(r"youtube\.com/(?:embed/|watch\?v=|shorts/)|youtu\.be/", text, flags=re.I))
+
+
+def youtube_iframe(src: str) -> str:
+    return f'<iframe width="795" height="448" frameborder="0" allowfullscreen src="{src}"></iframe>'
+
+
+def remove_placeholder_youtube(text: str) -> str:
+    out = re.sub(r"\n?## Related Video\s*\n\s*<iframe[^>]+youtube-url-placeholder[^>]*></iframe>\s*", "\n", text, flags=re.I)
+    out = re.sub(r"\n?<iframe[^>]+youtube-url-placeholder[^>]*></iframe>\s*", "\n", out, flags=re.I)
+    return re.sub(r"\n{3,}", "\n\n", out).strip()
+
+
+def ensure_cms_media(markdown: str, title: str, row: dict[str, str]) -> str:
     text = strip_front_matter(markdown)
+    text = remove_placeholder_youtube(text)
     if "image-placeholder.png" not in text:
         image_md = f"![{normalize(title)}](image-placeholder.png)"
         parts = text.split("\n\n")
         insert_at = 3 if len(parts) > 4 else min(1, len(parts))
         parts.insert(insert_at, image_md)
         text = "\n\n".join(parts)
-    if "youtube-url-placeholder" not in text:
-        iframe = '<iframe width="795" height="448" frameborder="0" allowfullscreen src="youtube-url-placeholder"></iframe>'
-        video_block = "## Related Video\n\n" + iframe
+
+    selected_embed = normalize(row.get("selected_youtube_embed_url")) or youtube_embed_from_url(row.get("selected_youtube_url", ""))
+    if selected_embed and not has_real_youtube(text):
+        video_block = "## Related Video\n\n" + youtube_iframe(selected_embed)
         marker = "## Frequently Asked"
         idx = text.find(marker)
         if idx >= 0:
@@ -207,7 +235,7 @@ def main() -> int:
             results.append({"title": title, "status": "error", "cms_id": "", "message": f"markdown not found: {md_path}"})
             continue
         raw_md = md_path.read_text(encoding="utf-8", errors="ignore")
-        content = ensure_cms_placeholders(raw_md, title)
+        content = ensure_cms_media(raw_md, title, row)
         keyword_id = match_keyword_id(row.get("keyword", ""), keywords) if args.publish else None
         category_id = None if keyword_id else (args.category_id or match_category_id(row.get("category", ""), categories) if args.publish else args.category_id or None)
 
@@ -227,7 +255,9 @@ def main() -> int:
             continue
 
         if not args.publish:
-            results.append({"title": title, "status": "dry_run", "cms_id": "", "message": json.dumps(payload, ensure_ascii=False)[:500]})
+            video_mode = "real_youtube" if has_real_youtube(content) else "cms_fallback_video"
+            message = json.dumps({"payload_preview": payload, "video_mode": video_mode}, ensure_ascii=False)[:700]
+            results.append({"title": title, "status": "dry_run", "cms_id": "", "message": message})
             continue
 
         try:
