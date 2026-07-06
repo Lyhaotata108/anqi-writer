@@ -3,6 +3,7 @@
 """Streamlit UI for the multi-category SEO pipeline."""
 
 from __future__ import annotations
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import csv
 import json
@@ -227,6 +228,42 @@ def run_cms_import(paths: dict[str, Path], settings: dict[str, int | bool]) -> t
     return run_command(cmd)
 
 
+def run_category_task(
+    category: str,
+    keywords: list[str],
+    run_name: str,
+    use_ai: bool,
+    use_youtube: bool,
+    max_articles: int,
+    overwrite: bool,
+    cms_auto_import: bool,
+    cms_settings: dict[str, int | bool],
+) -> tuple[str, dict[str, Path], list[tuple[str, bool, str]]]:
+    category_max_articles = int(max_articles)
+    if cms_auto_import and int(cms_settings.get("max_articles", 0) or 0) > 0:
+        cap = int(cms_settings.get("max_articles", 0) or 0)
+        category_max_articles = min(category_max_articles, cap) if category_max_articles > 0 else cap
+
+    paths, logs = run_pipeline(
+        keywords=keywords,
+        run_name=run_name,
+        category=category,
+        use_ai=use_ai,
+        use_youtube=use_youtube,
+        max_articles=category_max_articles,
+        overwrite=overwrite,
+        cms_auto_import=cms_auto_import,
+        cms_settings=cms_settings,
+    )
+
+    if cms_auto_import and not use_ai:
+        ok, output = run_cms_import(paths, cms_settings)
+        label = "CMS真实发布" if cms_settings.get("publish") else "CMS导入 dry-run"
+        logs.append((label, ok, output))
+
+    return category, paths, logs
+
+
 def csv_download(path: Path, label: str) -> None:
     if path.exists():
         st.download_button(
@@ -331,7 +368,7 @@ model_name = cfg_value(config, ["GEMINI_MODEL", "OPENAI_MODEL"], "gemini-3-flash
 base_url = cfg_value(config, ["GEMINI_BASE_URL", "OPENAI_BASE_URL"], "")
 
 st.title("Anqi Writer SEO Pipeline")
-st.caption("支持 Weight Loss / CBD / Blood 同时跑：关键词聚类 → 标题 → 正文蓝图 → Gemini 正文 → Markdown + HTML 预览 → 可选单篇即时 CMS 导入。")
+st.caption("支持 Weight Loss / CBD / Blood 三分类并发运行：关键词聚类 → 标题 → 正文蓝图 → Gemini 正文 → 每篇生成后立即导入 CMS。")
 
 with st.sidebar:
     st.header("运行设置")
@@ -355,9 +392,9 @@ with st.sidebar:
     cms_only_ready = st.checkbox("只导入 publish_ready = yes 的文章", value=True, disabled=not cms_auto_import)
     cms_max_articles = st.number_input("CMS 每个分类最多导入几篇，0 = 跟随生成数量", min_value=0, value=0, step=1, disabled=not cms_auto_import)
     cms_category_id = st.number_input("覆盖 category_id，0 = 使用固定映射", min_value=0, value=0, step=1, disabled=not cms_auto_import)
-    st.caption("AI 模式下会生成第 1 篇 → 写入队列/预览 → 立即 dry-run/发布第 1 篇 → 再生成第 2 篇。固定映射：Weight Loss = 1，CBD = 5，Blood = 9。")
+    st.caption("三分类会并发运行；每个分类内部保持生成第 1 篇 → 立即 dry-run/发布第 1 篇 → 再生成第 2 篇。固定映射：Weight Loss = 1，CBD = 5，Blood = 9。")
     if cms_auto_import and cms_publish:
-        st.warning("已开启真实发布。建议先关闭此项 dry-run 测试。")
+        st.warning("已开启真实发布。并发发布会同时向 CMS 发起请求，建议先每类 1–3 篇测试。")
 
     st.divider()
     st.subheader("历史文件清理")
@@ -399,27 +436,54 @@ if start:
             deleted = cleanup_history(run_name, int(cleanup_keep_runs), int(cleanup_older_days))
             if deleted:
                 st.info("已清理历史运行目录：" + ", ".join(deleted[:12]) + (" ..." if len(deleted) > 12 else ""))
-        with st.status("正在运行多分类 SEO Pipeline...", expanded=True) as status:
+
+        with st.status("正在并发运行多分类 SEO Pipeline...", expanded=True) as status:
             all_ok = True
-            for category, keywords in runnable.items():
-                st.markdown(f"#### {CATEGORY_LABELS[category]}")
-                category_max_articles = int(max_articles)
-                if cms_auto_import and int(cms_max_articles) > 0:
-                    category_max_articles = min(category_max_articles, int(cms_max_articles)) if category_max_articles > 0 else int(cms_max_articles)
-                paths, logs = run_pipeline(
-                    keywords, run_name, category, use_ai, use_youtube,
-                    category_max_articles, bool(overwrite), bool(cms_auto_import), cms_settings,
-                )
-                if cms_auto_import and not use_ai:
-                    ok, output = run_cms_import(paths, cms_settings)
-                    label = "CMS真实发布" if cms_publish else "CMS导入 dry-run"
-                    logs.append((label, ok, output))
-                paths_by_category[category] = {k: str(v) for k, v in paths.items()}
-                for step, ok, output in logs:
-                    all_ok = all_ok and ok
-                    (st.success if ok else st.error)(f"{CATEGORY_LABELS[category]} · {step}")
-                    if output:
-                        st.code(output)
+            finished_count = 0
+            total_count = len(runnable)
+            max_workers = min(3, total_count)
+            future_map = {}
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                for category, keywords in runnable.items():
+                    future = executor.submit(
+                        run_category_task,
+                        category,
+                        keywords,
+                        run_name,
+                        use_ai,
+                        use_youtube,
+                        int(max_articles),
+                        bool(overwrite),
+                        bool(cms_auto_import),
+                        cms_settings,
+                    )
+                    future_map[future] = category
+
+                for future in as_completed(future_map):
+                    category = future_map[future]
+                    st.markdown(f"#### {CATEGORY_LABELS[category]}")
+                    try:
+                        category_name, paths, logs = future.result()
+                        paths_by_category[category_name] = {k: str(v) for k, v in paths.items()}
+                        for step, ok, output in logs:
+                            all_ok = all_ok and ok
+                            (st.success if ok else st.error)(f"{CATEGORY_LABELS[category_name]} · {step}")
+                            if output:
+                                st.code(output)
+                    except Exception as exc:
+                        all_ok = False
+                        st.error(f"{CATEGORY_LABELS[category]} · 运行失败")
+                        st.code(str(exc))
+
+                    finished_count += 1
+                    status.update(label=f"并发运行中... 已完成 {finished_count}/{total_count}", state="running")
+
+            ordered_paths: dict[str, dict[str, str]] = {}
+            for category in selected_categories:
+                if category in paths_by_category:
+                    ordered_paths[category] = paths_by_category[category]
+            paths_by_category = ordered_paths
             status.update(label="运行完成" if all_ok else "部分分类运行失败", state="complete" if all_ok else "error")
         st.session_state["last_runs"] = paths_by_category
 
